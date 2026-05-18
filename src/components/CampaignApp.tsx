@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useEffect } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import {
   Search, ArrowDownUp, Star, ChevronRight, X, Plus, Check,
   Zap, Heart, BadgePercent, Cpu, MapPin, Sparkles,
@@ -12,11 +12,15 @@ import {
   type NeedItem, type OptimizationResult,
 } from '../engine/optimizer';
 import {
-  searchProducts, loadAllProducts, setAPILocation, subscribeAPI, type MarketProduct, type ConnectionStatus,
+  searchProducts, loadAllProducts, setAPILocation, setRadius, clearCache, subscribeAPI, type MarketProduct, type ConnectionStatus,
 } from '../api/market-api';
-import { useLocation, cityList } from '../hooks/useLocation';
+import { useLocation, searchAddress, popularDistricts, type AddressResult } from '../hooks/useLocation';
 import { usePersistedState } from '../hooks/usePersistedState';
 import { getAllHistories, type ProductHistory } from '../hooks/usePriceHistory';
+import AdSlot from './AdSlot';
+import AdminPanel, { useAdminSettings, useAnalytics } from './AdminPanel';
+import { getMarketLink, getTrendyolLink, getHepsiburadaLink } from '../utils/marketLinks';
+import { trackSupabaseEvent } from '../lib/supabase';
 
 type ViewMode = 'home' | 'cart' | 'compare' | 'profile';
 
@@ -63,12 +67,23 @@ export default function CampaignApp() {
   const [detailProduct, setDetailProduct] = useState<MarketProduct | null>(null);
   const [selectedHistory, setSelectedHistory] = useState<ProductHistory | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const { location, requestGPS, setCity } = useLocation();
+  const [adminOpen, setAdminOpen] = useState(false);
+  const adminTapsRef = useRef(0);
+  const { settings: adminSettings, setSettings: setAdminSettings } = useAdminSettings();
+  const { data: analyticsData, track: localTrack, reset: resetAnalytics } = useAnalytics();
+  const track = (event: string) => {
+    localTrack(event as Parameters<typeof localTrack>[0]);
+    trackSupabaseEvent(event, { city: location.city, radius });
+  };
+  const { location, requestGPS, setManualLocation, displayName } = useLocation();
+  const [addressQuery, setAddressQuery] = useState('');
+  const [addressResults, setAddressResults] = useState<AddressResult[]>([]);
+  const [radius, setRadiusState] = usePersistedState<number>('search_radius', 3);
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(null), 2500); };
   const toggleFav = (id: string) => {
     if (favorites.has(id)) { setFavArray(favArray.filter((f) => f !== id)); showToast('Favoriden çıkarıldı'); }
-    else { setFavArray([...favArray, id]); showToast('❤️ Favorilere eklendi'); }
+    else { setFavArray([...favArray, id]); showToast('❤️ Favorilere eklendi'); track('favoriteAdds'); }
   };
   const addRecentSearch = (q: string) => {
     if (!q.trim()) return;
@@ -84,10 +99,14 @@ export default function CampaignApp() {
   useEffect(() => {
     const unsub = subscribeAPI((s) => { setApiStatus(s.status); });
     loadPopular();
+    track('pageViews');
     return unsub;
   }, []);
 
-  useEffect(() => { setAPILocation(location.lat, location.lon); }, [location.lat, location.lon]);
+  useEffect(() => {
+    setAPILocation(location.lat, location.lon, radius);
+    loadPopular();
+  }, [location.lat, location.lon, radius]);
 
   async function loadPopular() {
     setLoading(true);
@@ -100,7 +119,7 @@ export default function CampaignApp() {
     if (!searchQuery.trim()) { setSearchResults([]); return; }
     const t = setTimeout(async () => {
       setLoading(true);
-      try { const r = await searchProducts(searchQuery, 30); setSearchResults(r); addRecentSearch(searchQuery); } catch { /**/ }
+      try { const r = await searchProducts(searchQuery, 30); setSearchResults(r); addRecentSearch(searchQuery); track('searches'); } catch { /**/ }
       setLoading(false);
     }, 400);
     return () => clearTimeout(t);
@@ -149,74 +168,179 @@ export default function CampaignApp() {
   const SkeletonRow = () => (<div className="flex items-center gap-3 rounded-xl border border-slate-700/30 bg-slate-800/30 p-3"><div className="skeleton h-11 w-11 flex-shrink-0" /><div className="flex-1 space-y-2"><div className="skeleton h-4 w-3/4" /><div className="skeleton h-3 w-1/2" /></div><div className="skeleton h-6 w-16 flex-shrink-0" /></div>);
   const SkeletonGrid = ({ count = 6 }: { count?: number }) => (<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">{Array.from({ length: count }).map((_, i) => <SkeletonRow key={i} />)}</div>);
 
-  const ProductRow = ({ p, delay = 0 }: { p: MarketProduct; delay?: number }) => (
-    <div onClick={() => setDetailProduct(p)} className="group flex items-center gap-3 rounded-xl border border-slate-700/50 bg-slate-800/50 p-3 transition-all hover:bg-slate-800 hover:border-slate-600 animate-fade-in cursor-pointer active:scale-[0.98]" style={{ animationDelay: `${delay}ms` }}>
-      {p.imageUrl ? <img src={p.imageUrl} alt="" className="h-11 w-11 rounded-xl object-cover flex-shrink-0 bg-slate-700" loading="lazy" /> :
-       <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-700 text-xl flex-shrink-0">{p.emoji}</div>}
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-bold text-slate-100 truncate">{p.name}</p>
-        <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-          <span className="text-[10px] font-medium text-slate-400">{p.marketLogo} {p.marketName}</span>
-          {p.brand && <span className="text-[10px] text-slate-500">{p.brand}</span>}
-          {p.unit && <span className="text-[10px] text-slate-600">• {p.unit}</span>}
+  const ProductRow = ({ p, delay = 0 }: { p: MarketProduct; delay?: number }) => {
+    const marketLink = adminSettings.showOnlineOrder ? getMarketLink(p.marketId, p.name) : null;
+    return (
+      <div onClick={() => { setDetailProduct(p); track('productClicks'); }} className="group flex items-center gap-3 rounded-xl border border-slate-700/50 bg-slate-800/50 p-3 sm:p-3 transition-all hover:bg-slate-800 hover:border-slate-600 animate-fade-in cursor-pointer active:scale-[0.98] min-h-[56px]" style={{ animationDelay: `${delay}ms` }}>
+        {p.imageUrl ? <img src={p.imageUrl} alt="" className="h-12 w-12 sm:h-11 sm:w-11 rounded-xl object-cover flex-shrink-0 bg-slate-700" loading="lazy" /> :
+         <div className="flex h-12 w-12 sm:h-11 sm:w-11 items-center justify-center rounded-xl bg-slate-700 text-xl flex-shrink-0">{p.emoji}</div>}
+        <div className="flex-1 min-w-0">
+          <p className="text-[13px] sm:text-sm font-bold text-slate-100 truncate">{p.name}</p>
+          <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+            {marketLink ? (
+              <a href={marketLink.url} target="_blank" rel="noopener noreferrer" onClick={(e) => { e.stopPropagation(); track('affiliateClicks'); }}
+                className="text-[11px] sm:text-[10px] font-medium text-emerald-400 hover:text-emerald-300 hover:underline">
+                {p.marketLogo} {p.marketName} →
+              </a>
+            ) : (
+              <span className="text-[11px] sm:text-[10px] font-medium text-slate-400">{p.marketLogo} {p.marketName}</span>
+            )}
+            {p.distanceKm !== null && <span className="text-[10px] text-slate-600">📍{p.distanceKm}km</span>}
+            {p.unit && <span className="text-[10px] text-slate-600">• {p.unit}</span>}
+          </div>
         </div>
+        <div className="text-right flex-shrink-0">
+          <span className="text-[17px] sm:text-lg font-extrabold text-emerald-400">₺{p.price.toFixed(2)}</span>
+          {p.unitPrice && <p className="text-[9px] text-slate-500">{p.unitPrice}</p>}
+        </div>
+        {priceAlerts[p.name.toLowerCase()] && p.price <= priceAlerts[p.name.toLowerCase()] && (
+          <span className="rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold text-amber-400 flex-shrink-0 pulse-dot">🔔</span>
+        )}
+        <button onClick={(e) => { e.stopPropagation(); toggleFav(p.id); }} className={`flex-shrink-0 rounded-full p-2 sm:p-1.5 transition-all ${favorites.has(p.id) ? 'text-red-400' : 'text-slate-700 sm:opacity-0 sm:group-hover:opacity-100 hover:text-red-400'}`}>
+          <Heart size={16} fill={favorites.has(p.id) ? 'currentColor' : 'none'} />
+        </button>
       </div>
-      <div className="text-right flex-shrink-0">
-        <span className="text-lg font-extrabold text-emerald-400">₺{p.price.toFixed(2)}</span>
-        {p.unitPrice && <p className="text-[9px] text-slate-500">{p.unitPrice}</p>}
-      </div>
-      {priceAlerts[p.name.toLowerCase()] && p.price <= priceAlerts[p.name.toLowerCase()] && (
-        <span className="rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold text-amber-400 flex-shrink-0 pulse-dot">🔔</span>
-      )}
-      <button onClick={(e) => { e.stopPropagation(); toggleFav(p.id); }} className={`flex-shrink-0 rounded-full p-1.5 transition-all ${favorites.has(p.id) ? 'text-red-400' : 'text-slate-700 opacity-0 group-hover:opacity-100 hover:text-red-400'}`}>
-        <Heart size={14} fill={favorites.has(p.id) ? 'currentColor' : 'none'} />
-      </button>
-    </div>
-  );
+    );
+  };
 
   const DetailModal = () => {
     if (!detailProduct) return null;
     const p = detailProduct;
-    const similar = allProducts.filter((x) => x.name === p.name && x.id !== p.id).sort((a, b) => a.price - b.price);
+    // Aynı üründen tüm marketleri bul — mevcut dahil, fiyata göre sırala
+    const allVersions = allProducts
+      .filter((x) => x.name === p.name)
+      .sort((a, b) => a.price - b.price);
+    const cheapest = allVersions[0];
+    const expensive = allVersions[allVersions.length - 1];
+    const spread = allVersions.length > 1 ? +(expensive.price - cheapest.price).toFixed(2) : 0;
+
     return (
       <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setDetailProduct(null)} style={{ animation: 'fadeIn 0.2s' }}>
-        <div className="w-full max-w-lg rounded-t-3xl sm:rounded-3xl border border-slate-700 bg-slate-900 p-5 max-h-[85vh] overflow-y-auto animate-slide-up" onClick={(e) => e.stopPropagation()}>
+        <div className="w-full max-w-lg rounded-t-3xl sm:rounded-3xl border border-slate-700 bg-slate-900 p-4 sm:p-5 max-h-[90vh] overflow-y-auto animate-slide-up" onClick={(e) => e.stopPropagation()}>
+          {/* Drag handle mobilde */}
+          <div className="flex justify-center mb-3 sm:hidden"><div className="h-1 w-10 rounded-full bg-slate-700" /></div>
+
+          {/* Ürün bilgisi */}
           <div className="flex items-start gap-3 mb-4">
             {p.imageUrl ? <img src={p.imageUrl} alt="" className="h-16 w-16 rounded-2xl object-cover bg-slate-700" /> : <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-700 text-3xl">{p.emoji}</div>}
-            <div className="flex-1"><p className="font-bold text-slate-100">{p.name}</p><p className="text-xs text-slate-500">{p.brand} • {p.unit}</p><p className="text-xs text-slate-600">{p.category}</p></div>
+            <div className="flex-1 min-w-0">
+              <p className="font-bold text-slate-100 text-base">{p.name}</p>
+              <p className="text-xs text-slate-500">{p.brand} • {p.unit}</p>
+              {p.category && <p className="text-[10px] text-slate-600 mt-0.5">{p.category}</p>}
+            </div>
             <button onClick={() => setDetailProduct(null)} className="rounded-full bg-slate-800 p-2 text-slate-400 hover:text-white"><X size={16} /></button>
           </div>
-          <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/20 p-4 mb-4 text-center">
-            <p className="text-2xl font-extrabold text-emerald-400">₺{p.price.toFixed(2)}</p>
-            <p className="text-xs text-slate-400 mt-1">{p.marketLogo} {p.marketName} • {p.depotName}</p>
-            {p.unitPrice && <p className="text-[10px] text-slate-500">{p.unitPrice}</p>}
-          </div>
-          {similar.length > 0 && (
-            <div className="mb-4">
-              <h4 className="text-xs font-bold text-slate-400 mb-2">Diğer Marketler ({similar.length})</h4>
-              <div className="space-y-1.5">{similar.map((s, i) => (
-                <div key={s.id} className="flex items-center gap-3">
-                  <div className="flex items-center gap-1.5 w-28 text-xs font-medium text-slate-400 flex-shrink-0">{s.marketLogo} {s.marketName}</div>
-                  <div className="flex-1 h-5 bg-slate-800 rounded-lg overflow-hidden relative">
-                    <div className={`h-full rounded-lg ${i === 0 && s.price <= p.price ? 'bg-emerald-500/50' : 'bg-slate-600'}`} style={{ width: `${(s.price / (similar[similar.length - 1]?.price || s.price)) * 100}%` }} />
-                    <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-300">₺{s.price.toFixed(2)}</span>
-                  </div>
+
+          {/* Fiyat kartı */}
+          <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/20 p-4 mb-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-[10px] text-slate-500 mb-0.5">En ucuz fiyat</p>
+                <p className="text-2xl font-extrabold text-emerald-400">₺{(cheapest || p).price.toFixed(2)}</p>
+              </div>
+              {spread > 0 && (
+                <div className="text-right">
+                  <p className="text-[10px] text-slate-500 mb-0.5">Fiyat farkı</p>
+                  <p className="text-lg font-bold text-amber-400">₺{spread}</p>
                 </div>
-              ))}</div>
+              )}
+            </div>
+            <div className="flex items-center gap-2 mt-2 text-xs text-slate-400">
+              <span>{(cheapest || p).marketLogo} {(cheapest || p).marketName}</span>
+              {(cheapest || p).depotName && <span>• {(cheapest || p).depotName}</span>}
+              {(cheapest || p).distanceKm !== null && <span>• 📍 {(cheapest || p).distanceKm}km</span>}
+            </div>
+            {(cheapest || p).unitPrice && <p className="text-[10px] text-slate-500 mt-1">{(cheapest || p).unitPrice}</p>}
+          </div>
+
+          {/* Tüm marketlerdeki fiyatlar */}
+          {allVersions.length > 0 && (
+            <div className="mb-4">
+              <h4 className="text-xs font-bold text-slate-400 mb-2">
+                {allVersions.length > 1 ? `${allVersions.length} markette karşılaştırma` : 'Market bilgisi'}
+              </h4>
+              <div className="space-y-1.5">
+                {allVersions.map((s, i) => (
+                  <div key={s.id} className={`flex items-center gap-2 rounded-lg p-2 ${i === 0 ? 'bg-emerald-500/5 border border-emerald-500/20' : ''}`}>
+                    <span className="text-sm">{s.marketLogo}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-medium text-slate-300">{s.marketName}</span>
+                        {i === 0 && allVersions.length > 1 && <span className="text-[8px] rounded-full bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 font-bold">EN UCUZ</span>}
+                      </div>
+                      <div className="flex items-center gap-2 text-[10px] text-slate-600">
+                        {s.depotName && <span>{s.depotName}</span>}
+                        {s.distanceKm !== null && <span>📍 {s.distanceKm}km</span>}
+                      </div>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <span className={`text-sm font-bold ${i === 0 ? 'text-emerald-400' : 'text-slate-300'}`}>₺{s.price.toFixed(2)}</span>
+                      {s.unitPrice && <p className="text-[9px] text-slate-600">{s.unitPrice}</p>}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
-          <div className="grid grid-cols-2 gap-2">
+
+          {/* Aksiyon butonları */}
+          <div className="grid grid-cols-2 gap-2 mb-3">
             <button onClick={() => { addNeed(p.name); setDetailProduct(null); showToast('✅ Sepete eklendi'); }} className="flex items-center justify-center gap-1.5 rounded-xl border border-violet-500/30 bg-violet-500/10 py-3 text-xs font-medium text-violet-400 hover:bg-violet-500/20 active:scale-95 transition-all">
               <Plus size={14} /> Sepete Ekle
             </button>
             <button onClick={() => {
               const key = p.name.toLowerCase();
               if (priceAlerts[key]) { const n = { ...priceAlerts }; delete n[key]; setPriceAlerts(n); showToast('Alarm kapatıldı'); }
-              else { setPriceAlerts({ ...priceAlerts, [key]: p.price * 0.9 }); showToast(`🔔 ₺${(p.price * 0.9).toFixed(2)} altına düşünce uyarılacak`); }
+              else { setPriceAlerts({ ...priceAlerts, [key]: p.price * 0.9 }); showToast(`🔔 ₺${(p.price * 0.9).toFixed(2)} altına düşünce uyarı`); }
             }} className={`flex items-center justify-center gap-1.5 rounded-xl border py-3 text-xs font-medium active:scale-95 transition-all ${priceAlerts[p.name.toLowerCase()] ? 'border-amber-500/30 bg-amber-500/10 text-amber-400' : 'border-slate-700 bg-slate-800 text-slate-400 hover:bg-slate-700'}`}>
               🔔 {priceAlerts[p.name.toLowerCase()] ? 'Alarm Aktif' : 'Fiyat Alarmı'}
             </button>
           </div>
+
+          {/* Favori butonu */}
+          <button onClick={(e) => { e.stopPropagation(); toggleFav(p.id); }} className={`w-full flex items-center justify-center gap-1.5 rounded-xl border py-2.5 text-xs font-medium transition-all ${favorites.has(p.id) ? 'border-red-500/30 bg-red-500/10 text-red-400' : 'border-slate-700 bg-slate-800 text-slate-500 hover:text-red-400'}`}>
+            <Heart size={14} fill={favorites.has(p.id) ? 'currentColor' : 'none'} />
+            {favorites.has(p.id) ? 'Favorilerde' : 'Favorilere Ekle'}
+          </button>
+
+          {/* Online Sipariş Ver */}
+          {adminSettings.showOnlineOrder && <div className="mt-4 pt-3 border-t border-slate-800">
+            <p className="text-[10px] text-slate-600 mb-2">🛒 Online sipariş ver</p>
+            <div className="space-y-1.5">
+              {/* Mevcut market linki */}
+              {(() => {
+                const link = getMarketLink(p.marketId, p.name);
+                return link ? (
+                  <a href={link.url} target="_blank" rel="noopener noreferrer" onClick={() => track('affiliateClicks')}
+                    className={`flex items-center justify-between rounded-xl bg-gradient-to-r ${link.color} p-3 text-white active:scale-[0.98] transition-all`}>
+                    <div className="flex items-center gap-2">
+                      <span className="text-lg">{p.marketLogo}</span>
+                      <div>
+                        <p className="text-xs font-bold">{link.label}</p>
+                        <p className="text-[9px] opacity-80">Bu ürünü online sipariş et</p>
+                      </div>
+                    </div>
+                    <ChevronRight size={16} className="opacity-70" />
+                  </a>
+                ) : null;
+              })()}
+
+              {/* Diğer online marketler (affiliate) */}
+              {adminSettings.showAffiliate && (
+                <div className="flex gap-1.5">
+                  <a href={getTrendyolLink(p.name)} target="_blank" rel="noopener noreferrer" onClick={() => track('affiliateClicks')}
+                    className="flex-1 flex items-center justify-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 py-2.5 text-[11px] font-medium text-slate-400 hover:text-orange-400 hover:border-orange-500/30 transition-all">
+                    🟠 Trendyol
+                  </a>
+                  <a href={getHepsiburadaLink(p.name)} target="_blank" rel="noopener noreferrer" onClick={() => track('affiliateClicks')}
+                    className="flex-1 flex items-center justify-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 py-2.5 text-[11px] font-medium text-slate-400 hover:text-orange-400 hover:border-orange-500/30 transition-all">
+                    🟡 Hepsiburada
+                  </a>
+                </div>
+              )}
+              <p className="text-[8px] text-slate-700 text-center mt-1">Yönlendirme linki • Fiyatlar farklılık gösterebilir</p>
+            </div>
+          </div>}
         </div>
       </div>
     );
@@ -231,11 +355,16 @@ export default function CampaignApp() {
           <div>
             <div className="flex items-center gap-2"><BadgePercent size={20} /><h1 className="text-lg font-extrabold sm:text-xl">KampanyaRadarı</h1></div>
             <div className="flex items-center gap-2 text-[11px] text-emerald-300 mt-1">
-              <span className={`flex items-center gap-1 rounded-full px-2 py-0.5 font-bold ${apiStatus === 'live' ? 'bg-emerald-500/30' : 'bg-amber-500/30'}`}>
-                <span className={`h-1.5 w-1.5 rounded-full ${apiStatus === 'live' ? 'bg-emerald-400 pulse-dot' : 'bg-amber-400'}`} />
-                {apiStatus === 'live' ? 'Canlı' : 'Demo'}
+              <span className={`flex items-center gap-1 rounded-full px-2 py-0.5 font-bold ${apiStatus === 'live' ? 'bg-emerald-500/30' : 'bg-white/15'}`}>
+                <span className={`h-1.5 w-1.5 rounded-full ${apiStatus === 'live' ? 'bg-emerald-400 pulse-dot' : 'bg-white/40'}`} />
+                {apiStatus === 'live' ? 'Canlı' : 'Önizleme'}
               </span>
-              <button onClick={() => setShowCityPicker(!showCityPicker)} className="flex items-center gap-1 hover:text-white"><MapPin size={10} />{location.city}</button>
+              <button onClick={() => setShowCityPicker(!showCityPicker)} className="flex items-center gap-1 hover:text-white">
+                <MapPin size={10} />
+                {location.status === 'loading' ? <span className="flex items-center gap-1"><RefreshCw size={9} className="animate-spin" />Konum alınıyor...</span> :
+                 location.status === 'denied' ? <span>📍 Konum seç</span> :
+                 <span>{displayName} <span className="text-emerald-400/60">({radius}km)</span></span>}
+              </button>
               <span>•</span>
               <button onClick={loadPopular} className={loading ? 'animate-spin' : ''}><RefreshCw size={10} /></button>
               <span className="text-emerald-400/60">{timeSince(lastRefresh)}</span>
@@ -246,11 +375,81 @@ export default function CampaignApp() {
           </button>
         </div>
         {showCityPicker && (
-          <div className="mt-3 rounded-xl bg-white/10 backdrop-blur-sm p-3 space-y-2">
-            <button onClick={() => { requestGPS(); setShowCityPicker(false); }} className="flex w-full items-center gap-2 rounded-lg bg-white/15 px-3 py-2 text-xs hover:bg-white/25"><MapPin size={12} /> Konumumu Algıla</button>
-            <div className="flex flex-wrap gap-1">{cityList.map((c) => (
-              <button key={c} onClick={() => { setCity(c); setShowCityPicker(false); }} className={`rounded-full px-2 py-0.5 text-[10px] ${location.city === c ? 'bg-emerald-500/40 font-bold' : 'bg-white/10 hover:bg-white/20'}`}>{c}</button>
-            ))}</div>
+          <div className="mt-3 rounded-xl bg-white/10 backdrop-blur-sm p-3 space-y-3">
+            {/* GPS butonu */}
+            <button onClick={() => { requestGPS(); setShowCityPicker(false); }} className="flex w-full items-center gap-2 rounded-lg bg-emerald-500/20 border border-emerald-500/30 px-3 py-2.5 text-xs font-medium hover:bg-emerald-500/30 transition-all">
+              <MapPin size={14} /> Konumumu Otomatik Algıla (GPS)
+            </button>
+
+            {/* Adres arama */}
+            <div className="relative">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/40" />
+              <input type="text" placeholder="Mahalle, semt veya ilçe yaz..." value={addressQuery}
+                onChange={(e) => {
+                  setAddressQuery(e.target.value);
+                  if (e.target.value.length >= 3) {
+                    searchAddress(e.target.value).then(setAddressResults);
+                  } else { setAddressResults([]); }
+                }}
+                className="w-full rounded-lg bg-white/10 border border-white/10 py-2.5 pl-9 pr-3 text-xs text-white placeholder-white/40 focus:border-white/30 focus:outline-none" />
+            </div>
+
+            {/* Arama sonuçları */}
+            {addressResults.length > 0 && (
+              <div className="space-y-1 max-h-40 overflow-y-auto">
+                {addressResults.map((r, i) => (
+                  <button key={i} onClick={() => {
+                    setManualLocation(r.lat, r.lon, r.district, r.city);
+                    setShowCityPicker(false); setAddressQuery(''); setAddressResults([]);
+                    clearCache();
+                    showToast(`📍 ${r.district || r.city} — ${radius}km yarıçapta aranıyor`);
+                  }} className="flex w-full items-center gap-2 rounded-lg bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/15 text-left transition-all">
+                    <MapPin size={12} className="text-emerald-400 flex-shrink-0" />
+                    <span className="truncate">{r.display}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Yarıçap seçimi */}
+            <div>
+              <p className="text-[10px] text-white/40 mb-1.5">Arama yarıçapı</p>
+              <div className="flex gap-1.5">
+                {[1, 3, 5, 10].map((km) => (
+                  <button key={km} onClick={() => {
+                    setRadiusState(km);
+                    setRadius(km);
+                    clearCache();
+                    setShowCityPicker(false);
+                    showToast(`📏 ${km}km yarıçapla yeniden yükleniyor...`);
+                  }} className={`flex-1 rounded-lg py-2.5 text-xs font-medium transition-all active:scale-95 ${radius === km ? 'bg-emerald-500/30 text-emerald-300 border border-emerald-500/50' : 'bg-white/5 text-white/50 border border-white/10 hover:bg-white/10'}`}>
+                    {km}km
+                  </button>
+                ))}
+              </div>
+              <p className="text-[9px] text-white/30 mt-1">
+                {radius <= 1 ? 'Sadece yürüme mesafesi' : radius <= 3 ? 'Yakın çevre' : radius <= 5 ? 'Geniş çevre' : 'Tüm bölge'}
+              </p>
+            </div>
+
+            {/* Popüler semtler */}
+            {addressResults.length === 0 && (
+              <div>
+                <p className="text-[10px] text-white/40 mb-1.5">Popüler semtler</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {popularDistricts.map((d) => (
+                    <button key={d.name} onClick={() => {
+                      setManualLocation(d.lat, d.lon, d.name, d.city);
+                      setShowCityPicker(false);
+                      clearCache();
+                      showToast(`📍 ${d.name}, ${d.city} — ${radius}km yarıçapta aranıyor`);
+                    }} className={`rounded-full px-2.5 py-1 text-[10px] transition-all ${location.district === d.name ? 'bg-emerald-500/40 font-bold' : 'bg-white/10 hover:bg-white/20'}`}>
+                      {d.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -284,17 +483,17 @@ export default function CampaignApp() {
       {/* Filtreler: Market → Kategori → Sırala */}
       <div className="space-y-2">
         <div className="flex gap-1.5 overflow-x-auto scrollbar-hide">
-          <button onClick={() => setHomeMarketFilter('all')} className={`rounded-full px-2.5 py-1.5 text-[11px] font-medium flex-shrink-0 transition-all border ${homeMarketFilter === 'all' ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40' : 'bg-slate-800/50 text-slate-400 border-slate-700/50'}`}>Tümü</button>
+          <button onClick={() => setHomeMarketFilter('all')} className={`rounded-full px-3 py-2 sm:px-2.5 sm:py-1.5 text-xs sm:text-[11px] font-medium flex-shrink-0 transition-all border active:scale-95 ${homeMarketFilter === 'all' ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40' : 'bg-slate-800/50 text-slate-400 border-slate-700/50'}`}>Tümü</button>
           {marketStats.map(([mid, info]) => (
-            <button key={mid} onClick={() => setHomeMarketFilter(mid)} className={`rounded-full px-2.5 py-1.5 text-[11px] font-medium flex-shrink-0 transition-all border ${homeMarketFilter === mid ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40' : 'bg-slate-800/50 text-slate-400 border-slate-700/50'}`}>
+            <button key={mid} onClick={() => setHomeMarketFilter(mid)} className={`rounded-full px-3 py-2 sm:px-2.5 sm:py-1.5 text-xs sm:text-[11px] font-medium flex-shrink-0 transition-all border active:scale-95 ${homeMarketFilter === mid ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40' : 'bg-slate-800/50 text-slate-400 border-slate-700/50'}`}>
               {info.logo} {info.name}
             </button>
           ))}
         </div>
         <div className="flex gap-1.5 overflow-x-auto scrollbar-hide">
-          <button onClick={() => setHomeCategoryFilter('all')} className={`rounded-full px-2.5 py-1.5 text-[11px] font-medium flex-shrink-0 transition-all border ${homeCategoryFilter === 'all' ? 'bg-violet-500/15 text-violet-400 border-violet-500/40' : 'bg-slate-800/50 text-slate-400 border-slate-700/50'}`}>🧺 Tümü</button>
+          <button onClick={() => setHomeCategoryFilter('all')} className={`rounded-full px-3 py-2 sm:px-2.5 sm:py-1.5 text-xs sm:text-[11px] font-medium flex-shrink-0 transition-all border active:scale-95 ${homeCategoryFilter === 'all' ? 'bg-violet-500/15 text-violet-400 border-violet-500/40' : 'bg-slate-800/50 text-slate-400 border-slate-700/50'}`}>🧺 Tümü</button>
           {productCategories.filter((c) => c.count > 0).map((cat) => (
-            <button key={cat.id} onClick={() => setHomeCategoryFilter(cat.id)} className={`rounded-full px-2.5 py-1.5 text-[11px] font-medium flex-shrink-0 transition-all border ${homeCategoryFilter === cat.id ? 'bg-violet-500/15 text-violet-400 border-violet-500/40' : 'bg-slate-800/50 text-slate-400 border-slate-700/50'}`}>
+            <button key={cat.id} onClick={() => setHomeCategoryFilter(cat.id)} className={`rounded-full px-3 py-2 sm:px-2.5 sm:py-1.5 text-xs sm:text-[11px] font-medium flex-shrink-0 transition-all border active:scale-95 ${homeCategoryFilter === cat.id ? 'bg-violet-500/15 text-violet-400 border-violet-500/40' : 'bg-slate-800/50 text-slate-400 border-slate-700/50'}`}>
               {cat.emoji} {cat.name}
             </button>
           ))}
@@ -309,16 +508,34 @@ export default function CampaignApp() {
         </div>
       </div>
 
+      {/* Ürün sayısı göstergesi */}
+      <div className="flex items-center justify-between">
+        <p className="text-[11px] text-slate-500">
+          {filteredProducts.length > 0 ? `${filteredProducts.length} ürün` : ''}
+          {(homeMarketFilter !== 'all' || homeCategoryFilter !== 'all') && ' (filtreli)'}
+        </p>
+        {loading && allProducts.length > 0 && <RefreshCw size={12} className="text-slate-600 animate-spin" />}
+      </div>
+
       {/* Ürünler */}
       {loading && allProducts.length === 0 ? <SkeletonGrid count={6} /> :
        filteredProducts.length > 0 ? (
-        <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">{filteredProducts.slice(0, 24).map((p, i) => <ProductRow key={p.id} p={p} delay={i * 20} />)}</div>
+        <div className="space-y-2">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">{filteredProducts.slice(0, 12).map((p, i) => <ProductRow key={p.id} p={p} delay={i * 20} />)}</div>
+          {filteredProducts.length > 12 && adminSettings.showAds && adminSettings.adsNative && <AdSlot type="native" />}
+          {filteredProducts.length > 12 && (
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">{filteredProducts.slice(12, 24).map((p) => <ProductRow key={p.id} p={p} delay={0} />)}</div>
+          )}
+        </div>
       ) : (
         <div className="rounded-xl border border-dashed border-slate-700 p-8 text-center">
           <p className="text-slate-500 text-sm">Ürün bulunamadı</p>
           <button onClick={() => { setHomeMarketFilter('all'); setHomeCategoryFilter('all'); }} className="mt-2 text-xs text-emerald-400 hover:underline">Filtreleri temizle</button>
         </div>
       )}
+
+      {/* Reklam — ürünler sonrası */}
+      {adminSettings.showAds && adminSettings.adsBanner && allProducts.length > 0 && <AdSlot type="banner" className="mt-2" />}
 
       {/* Karşılaştırma önizleme */}
       {comparisons.length > 0 && (
@@ -470,6 +687,8 @@ export default function CampaignApp() {
             const full = `🛒 Akıllı Sepet (${location.city})\n${'─'.repeat(25)}\n\n${txt}\n\n💰 Toplam: ₺${optResult.totalCost.toFixed(2)}\n🎉 Tasarruf: ₺${optResult.totalSaving.toFixed(2)}`;
             if (navigator.share) navigator.share({ text: full }); else { navigator.clipboard.writeText(full); showToast('📋 Panoya kopyalandı'); }
           }} className="w-full rounded-xl border border-slate-700 bg-slate-800 py-2.5 text-xs text-slate-400 hover:text-slate-200 flex items-center justify-center gap-1.5 transition-all"><Share2 size={14} /> Paylaş</button>
+
+          {adminSettings.showAds && adminSettings.adsNative && <AdSlot type="native" className="mt-2" />}
         </div>
       )}
 
@@ -611,17 +830,30 @@ export default function CampaignApp() {
           </div>
         )}
 
+        {adminSettings.showAds && adminSettings.adsBanner && <AdSlot type="banner" />}
+
         {/* Konum & Bağlantı */}
         <div className="grid grid-cols-2 gap-2">
           <div className="rounded-xl border border-slate-700/50 bg-slate-800/50 p-3">
             <p className="text-[10px] text-slate-600">📍 Konum</p>
-            <p className="text-xs font-medium text-slate-300">{location.city}</p>
+            <p className="text-xs font-medium text-slate-300">{displayName}</p>
+            {location.fullAddress && <p className="text-[8px] text-slate-600 truncate">{location.fullAddress}</p>}
           </div>
           <div className="rounded-xl border border-slate-700/50 bg-slate-800/50 p-3">
             <p className="text-[10px] text-slate-600">📡 Bağlantı</p>
-            <p className="text-xs font-medium text-slate-300">{apiStatus === 'live' ? '🟢 Canlı' : '🟡 Demo'}</p>
+            <p className="text-xs font-medium text-slate-300">{apiStatus === 'live' ? '🟢 Canlı Veri' : '📋 Önizleme'}</p>
           </div>
         </div>
+
+        {/* Versiyon — gizli admin tetikleyici */}
+        <button onClick={() => {
+          adminTapsRef.current++;
+          if (adminTapsRef.current >= 5) { setAdminOpen(true); adminTapsRef.current = 0; }
+          else if (adminTapsRef.current >= 3) showToast(`${5 - adminTapsRef.current}...`);
+          setTimeout(() => { adminTapsRef.current = 0; }, 2000);
+        }} className="w-full py-3 text-center">
+          <p className="text-[9px] text-slate-700">KampanyaRadarı v1.0 • TÜBİTAK Veri</p>
+        </button>
       </div>
     );
   };
@@ -659,6 +891,16 @@ export default function CampaignApp() {
 
       <DetailModal />
 
+      {/* Admin Panel */}
+      <AdminPanel
+        isOpen={adminOpen}
+        onClose={() => setAdminOpen(false)}
+        settings={adminSettings}
+        setSettings={setAdminSettings}
+        analytics={analyticsData}
+        onResetAnalytics={resetAnalytics}
+      />
+
       {/* Toast */}
       {toast && (
         <div className="fixed bottom-20 sm:bottom-6 left-1/2 -translate-x-1/2 z-50 animate-slide-up">
@@ -695,7 +937,7 @@ export default function CampaignApp() {
           ))}
         </div>
       </div>
-      <div className="h-16 sm:hidden" />
+      <div className="h-20 sm:hidden" /> {/* Bottom nav spacer */}
     </div>
   );
 }
