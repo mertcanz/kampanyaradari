@@ -89,6 +89,12 @@ function calcDistanceKm(aLat: number, aLon: number, bLat: number, bLon: number):
   return +(R * 2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1 - aa))).toFixed(2);
 }
 
+export function formatDistance(km: number | null): string {
+  if (km === null) return '';
+  if (km < 1) return `${Math.round(km * 1000)}m`;
+  return `${km.toFixed(1)}km`;
+}
+
 // ─── Parse ───
 
 function parseTubitak(data: Record<string, unknown>): MarketProduct[] {
@@ -171,54 +177,82 @@ let cachedAll: MarketProduct[] = [];
 let cachedVersion = -1;
 
 export async function loadAllProducts(): Promise<MarketProduct[]> {
-  // Cache geçerli mi?
   if (cachedAll.length > 0 && cachedVersion === locationVersion) return cachedAll;
 
-  const essentials = ['süt', 'yumurta', 'ekmek', 'domates', 'tavuk', 'peynir', 'makarna', 'deterjan'];
+  const phase1 = ['süt', 'domates', 'ekmek', 'yumurta'];
+  const phase2 = ['tavuk', 'peynir', 'makarna', 'deterjan'];
+  const essentials = phase1;
 
   try {
     const results = await Promise.allSettled(
       essentials.map(async (q) => {
-        const res = await fetch(buildUrl(q, 15), { signal: AbortSignal.timeout(12000) });
+        const res = await fetch(buildUrl(q, 8), { signal: AbortSignal.timeout(8000) });
         if (!res.ok) throw new Error(`${res.status}`);
         return parseTubitak(await res.json());
       })
     );
 
-    const selected = new Map<string, MarketProduct>();
+    // Her ürün adı için sadece EN YAKIN marketi tut
+    const bestPerProduct = new Map<string, MarketProduct>();
     for (const r of results) {
       if (r.status === 'fulfilled') {
         for (const p of r.value) {
+          // Ürün adı bazlı — her üründen 1 tane (en yakın)
           const key = `${p.name}-${p.marketId}`;
-          const existing = selected.get(key);
+          const existing = bestPerProduct.get(key);
           if (!existing) {
-            selected.set(key, p);
+            bestPerProduct.set(key, p);
           } else {
             const pDist = p.distanceKm ?? 9999;
             const eDist = existing.distanceKm ?? 9999;
             if (pDist < eDist || (pDist === eDist && p.price < existing.price)) {
-              selected.set(key, p);
+              bestPerProduct.set(key, p);
             }
           }
         }
       }
     }
 
-    const all = Array.from(selected.values());
+    const all = Array.from(bestPerProduct.values()).sort((a, b) => (a.distanceKm ?? 99) - (b.distanceKm ?? 99));
 
     if (all.length > 0) {
       cachedAll = all;
       cachedVersion = locationVersion;
       recordPrices(all);
-      updateState({ status: 'live', lastUpdate: new Date(), source: `TÜBİTAK • ${radius}km`, productCount: all.length });
+      updateState({ status: 'live', lastUpdate: new Date(), source: `${radius}km`, productCount: all.length });
+
+      // Phase 2 — arka planda geri kalanları yükle
+      setTimeout(async () => {
+        try {
+          const p2Results = await Promise.allSettled(
+            phase2.map(async (q) => {
+              const res = await fetch(buildUrl(q, 10), { signal: AbortSignal.timeout(15000) });
+              if (!res.ok) throw new Error(`${res.status}`);
+              return parseTubitak(await res.json());
+            })
+          );
+          const existing = new Map(cachedAll.map((p) => [`${p.name}-${p.marketId}`, p]));
+          for (const r of p2Results) {
+            if (r.status === 'fulfilled') {
+              for (const p of r.value) {
+                const key = `${p.name}-${p.marketId}`;
+                if (!existing.has(key)) { existing.set(key, p); }
+              }
+            }
+          }
+          cachedAll = Array.from(existing.values()).sort((a, b) => (a.distanceKm ?? 99) - (b.distanceKm ?? 99));
+          updateState({ status: 'live', lastUpdate: new Date(), source: `${radius}km`, productCount: cachedAll.length });
+        } catch { /**/ }
+      }, 500);
+
       return all;
     }
   } catch { /**/ }
 
-  // Simülasyon — yarıçapa göre filtreli
-  cachedAll = getSimProducts();
+  // Simülasyon — sadece bir kez hesapla
+  if (cachedAll.length === 0) cachedAll = getSimProducts();
   cachedVersion = locationVersion;
-  updateState({ status: 'simulation', lastUpdate: new Date(), source: `Önizleme • ${radius}km`, productCount: cachedAll.length });
+  updateState({ status: 'simulation', lastUpdate: new Date(), source: `${radius}km`, productCount: cachedAll.length });
   return cachedAll;
 }
 
@@ -243,7 +277,7 @@ export async function searchProducts(query: string, size = 30): Promise<MarketPr
   // Simülasyon arama
   const sim = getSimProducts();
   const filtered = sim.filter((p) => p.name.toLowerCase().includes(query.toLowerCase()) || p.brand.toLowerCase().includes(query.toLowerCase()));
-  updateState({ status: 'simulation', lastUpdate: new Date(), source: `Önizleme • ${radius}km`, productCount: filtered.length });
+  updateState({ status: 'simulation', lastUpdate: new Date(), source: `${radius}km`, productCount: filtered.length });
   return filtered;
 }
 

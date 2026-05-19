@@ -68,13 +68,16 @@ export async function upvoteCommunityPrice(id: string): Promise<boolean> {
 
 // ─── Analytics ───
 
-export async function trackSupabaseEvent(event: string, meta?: Record<string, unknown>): Promise<void> {
-  await db('radar_analytics', 'POST', {
-    event_name: event,
-    meta: meta || {},
-    page_url: window.location.href,
-    user_agent: navigator.userAgent.slice(0, 200),
-  });
+export function trackSupabaseEvent(event: string, meta?: Record<string, unknown>): void {
+  // Fire and forget — ana thread'i bloklamaz
+  setTimeout(() => {
+    db('radar_analytics', 'POST', {
+      event_name: event,
+      meta: meta || {},
+      page_url: window.location.href,
+      user_agent: navigator.userAgent.slice(0, 200),
+    }).catch(() => {});
+  }, 100);
 }
 
 export async function getAnalyticsSummary(): Promise<Record<string, number> | null> {

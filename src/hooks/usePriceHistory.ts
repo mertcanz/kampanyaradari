@@ -53,8 +53,16 @@ function normalizeKey(name: string): string {
   return name.toLowerCase().replace(/\s+\d+.*$/, '').trim(); // "Süt 1L" → "süt"
 }
 
-// Gelen ürünleri geçmişe kaydet
+// Gelen ürünleri geçmişe kaydet — debounced, max 20 ürün
+let recordTimeout: ReturnType<typeof setTimeout> | null = null;
 export function recordPrices(products: MarketProduct[]) {
+  if (recordTimeout) clearTimeout(recordTimeout);
+  recordTimeout = setTimeout(() => {
+    _recordPrices(products.slice(0, 20));
+  }, 2000);
+}
+
+function _recordPrices(products: MarketProduct[]) {
   const today = new Date().toISOString().split('T')[0];
   const history = loadHistory();
 

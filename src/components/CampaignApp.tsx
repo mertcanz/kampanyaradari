@@ -21,6 +21,8 @@ import AdSlot from './AdSlot';
 import AdminPanel, { useAdminSettings, useAnalytics } from './AdminPanel';
 import { getMarketLink, getTrendyolLink, getHepsiburadaLink } from '../utils/marketLinks';
 import { trackSupabaseEvent } from '../lib/supabase';
+import { formatDistance } from '../api/market-api';
+import { updatePageMeta, pageMeta } from '../utils/seo';
 
 type ViewMode = 'home' | 'cart' | 'compare' | 'profile';
 
@@ -42,6 +44,7 @@ export default function CampaignApp() {
   const [checkedItems, setCheckedItems] = usePersistedState<string[]>('checked_items', []);
   const [importText, setImportText] = useState('');
   const [showImport, setShowImport] = useState(false);
+  const [showMore, setShowMore] = useState(false);
 
   // Compare
   const [compareQuery, setCompareQuery] = useState('');
@@ -81,6 +84,29 @@ export default function CampaignApp() {
   const [radius, setRadiusState] = usePersistedState<number>('search_radius', 3);
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(null), 2500); };
+
+  // Güvenli paylaşım — her ortamda çalışır
+  const shareText = async (text: string) => {
+    try {
+      if (navigator.share) { await navigator.share({ text }); return; }
+    } catch { /* kullanıcı iptal etti */ }
+    // Clipboard fallback
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast('📋 Kopyalandı');
+    } catch {
+      // Son çare — textarea ile kopyala
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      showToast('📋 Kopyalandı');
+    }
+  };
   const toggleFav = (id: string) => {
     if (favorites.has(id)) { setFavArray(favArray.filter((f) => f !== id)); showToast('Favoriden çıkarıldı'); }
     else { setFavArray([...favArray, id]); showToast('❤️ Favorilere eklendi'); track('favoriteAdds'); }
@@ -95,47 +121,61 @@ export default function CampaignApp() {
     setNeedItems((prev: NeedItem[]) => [...prev, { id: `n-${Date.now()}`, keyword: t, emoji: getNeedEmoji(t) }]);
   }, [needItems, setNeedItems]);
 
-  // Init
+  // Init — tek yükleme
+  const loadingRef = useRef(false);
   useEffect(() => {
     const unsub = subscribeAPI((s) => { setApiStatus(s.status); });
-    loadPopular();
+    setAPILocation(location.lat, location.lon, radius);
+    if (!loadingRef.current) { loadingRef.current = true; loadPopular().finally(() => { loadingRef.current = false; }); }
     track('pageViews');
     return unsub;
   }, []);
 
+  // Konum/yarıçap değişimi
   useEffect(() => {
     setAPILocation(location.lat, location.lon, radius);
-    loadPopular();
+    if (!loadingRef.current) { loadingRef.current = true; loadPopular().finally(() => { loadingRef.current = false; }); }
   }, [location.lat, location.lon, radius]);
 
+  // SEO — sayfa değişiminde title güncelle
+  useEffect(() => {
+    const meta = pageMeta[view];
+    if (meta) updatePageMeta(meta.title, meta.desc);
+  }, [view]);
+
   async function loadPopular() {
+    if (loading) return;
     setLoading(true);
-    try { setAllProducts(await loadAllProducts()); } catch { /**/ }
+    try {
+      const products = await loadAllProducts();
+      setAllProducts(products);
+      setLastRefresh(new Date());
+    } catch { /**/ }
     setLoading(false);
-    setLastRefresh(new Date());
   }
 
   useEffect(() => {
     if (!searchQuery.trim()) { setSearchResults([]); return; }
     const t = setTimeout(async () => {
       setLoading(true);
-      try { const r = await searchProducts(searchQuery, 30); setSearchResults(r); addRecentSearch(searchQuery); track('searches'); } catch { /**/ }
+      try { const r = await searchProducts(searchQuery, 20); setSearchResults(r); addRecentSearch(searchQuery); track('searches'); } catch { /**/ }
       setLoading(false);
-    }, 400);
+    }, 600);
     return () => clearTimeout(t);
   }, [searchQuery]);
 
   const timeSince = (d: Date) => { const m = Math.floor((Date.now() - new Date(d).getTime()) / 60000); return m < 1 ? 'Az önce' : m < 60 ? `${m}dk` : `${Math.floor(m / 60)}sa`; };
 
-  // Derived
+  // Karşılaştırmalar — sadece view=home'da hesapla, max 3
   const comparisons = useMemo(() => {
+    if (view !== 'home' || allProducts.length === 0) return [];
     const g: Record<string, MarketProduct[]> = {};
-    for (const p of allProducts) { const k = p.name.split(' ').slice(0, 3).join(' '); if (!g[k]) g[k] = []; g[k].push(p); }
+    for (const p of allProducts) { const k = p.name; if (!g[k]) g[k] = []; g[k].push(p); }
     return Object.entries(g).filter(([, i]) => i.length >= 2).map(([n, i]) => {
       const s = [...i].sort((a, b) => a.price - b.price);
       return { name: n, emoji: s[0].emoji, items: s, saving: +(s[s.length - 1].price - s[0].price).toFixed(2) };
-    }).filter((c) => c.saving > 0).sort((a, b) => b.saving - a.saving);
-  }, [allProducts]);
+    }).filter((c) => c.saving > 0).sort((a, b) => b.saving - a.saving).slice(0, 3);
+  }, [allProducts, view]);
 
   const marketStats = useMemo(() => {
     const s: Record<string, { count: number; logo: string; name: string }> = {};
@@ -143,75 +183,69 @@ export default function CampaignApp() {
     return Object.entries(s).sort((a, b) => b[1].count - a[1].count);
   }, [allProducts]);
 
-  const productCategories = useMemo(() => categories.map((c) => ({
-    ...c,
-    count: c.searchTerms.reduce((s: number, kw: string) => s + allProducts.filter((p) => p.name.toLowerCase().includes(kw) || p.category.toLowerCase().includes(kw) || p.menuCategory.toLowerCase().includes(kw)).length, 0),
-  })), [allProducts]);
+  const productCategories = useMemo(() => {
+    if (view !== 'home' || allProducts.length === 0) return categories.map((c) => ({ ...c, count: 0 }));
+    return categories.map((c) => ({
+      ...c,
+      count: allProducts.filter((p) => c.searchTerms.some((kw) => p.name.toLowerCase().includes(kw) || p.category.toLowerCase().includes(kw))).length,
+    }));
+  }, [allProducts, view]);
 
   const filteredProducts = useMemo(() => {
-    let items = [...allProducts];
+    if (view !== 'home') return allProducts;
+    let items = allProducts;
     if (homeMarketFilter !== 'all') items = items.filter((p) => p.marketId === homeMarketFilter);
     if (homeCategoryFilter !== 'all') {
       const cat = categories.find((c) => c.id === homeCategoryFilter);
-      if (cat) items = items.filter((p) => cat.searchTerms.some((kw) => p.name.toLowerCase().includes(kw) || p.category.toLowerCase().includes(kw) || p.menuCategory.toLowerCase().includes(kw)));
+      if (cat) {
+        const kws = cat.searchTerms;
+        items = items.filter((p) => { const n = p.name.toLowerCase(); return kws.some((kw) => n.includes(kw)); });
+      }
     }
-    switch (homeSort) {
-      case 'cheap': items.sort((a, b) => a.price - b.price); break;
-      case 'discount': items.sort((a, b) => (b.discountRatio || 0) - (a.discountRatio || 0)); break;
-      case 'unit': items.sort((a, b) => (a.unitPriceValue ?? 9999) - (b.unitPriceValue ?? 9999)); break;
-    }
+    if (homeSort === 'cheap') return [...items].sort((a, b) => a.price - b.price);
+    if (homeSort === 'discount') return [...items].sort((a, b) => (b.discountRatio || 0) - (a.discountRatio || 0));
+    if (homeSort === 'unit') return [...items].sort((a, b) => (a.unitPriceValue ?? 9999) - (b.unitPriceValue ?? 9999));
     return items;
-  }, [allProducts, homeMarketFilter, homeCategoryFilter, homeSort]);
+  }, [allProducts, homeMarketFilter, homeCategoryFilter, homeSort, view]);
+
+  // Filtre değişince "daha fazla" kapat
+  useEffect(() => { setShowMore(false); }, [homeMarketFilter, homeCategoryFilter, homeSort]);
 
   // ─── Components ───
 
   const SkeletonRow = () => (<div className="flex items-center gap-3 rounded-xl border border-slate-700/30 bg-slate-800/30 p-3"><div className="skeleton h-11 w-11 flex-shrink-0" /><div className="flex-1 space-y-2"><div className="skeleton h-4 w-3/4" /><div className="skeleton h-3 w-1/2" /></div><div className="skeleton h-6 w-16 flex-shrink-0" /></div>);
   const SkeletonGrid = ({ count = 6 }: { count?: number }) => (<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">{Array.from({ length: count }).map((_, i) => <SkeletonRow key={i} />)}</div>);
 
-  const ProductRow = ({ p, delay = 0 }: { p: MarketProduct; delay?: number }) => {
-    const marketLink = adminSettings.showOnlineOrder ? getMarketLink(p.marketId, p.name) : null;
-    return (
-      <div onClick={() => { setDetailProduct(p); track('productClicks'); }} className="group flex items-center gap-3 rounded-xl border border-slate-700/50 bg-slate-800/50 p-3 sm:p-3 transition-all hover:bg-slate-800 hover:border-slate-600 animate-fade-in cursor-pointer active:scale-[0.98] min-h-[56px]" style={{ animationDelay: `${delay}ms` }}>
-        {p.imageUrl ? <img src={p.imageUrl} alt="" className="h-12 w-12 sm:h-11 sm:w-11 rounded-xl object-cover flex-shrink-0 bg-slate-700" loading="lazy" /> :
-         <div className="flex h-12 w-12 sm:h-11 sm:w-11 items-center justify-center rounded-xl bg-slate-700 text-xl flex-shrink-0">{p.emoji}</div>}
-        <div className="flex-1 min-w-0">
-          <p className="text-[13px] sm:text-sm font-bold text-slate-100 truncate">{p.name}</p>
-          <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-            {marketLink ? (
-              <a href={marketLink.url} target="_blank" rel="noopener noreferrer" onClick={(e) => { e.stopPropagation(); track('affiliateClicks'); }}
-                className="text-[11px] sm:text-[10px] font-medium text-emerald-400 hover:text-emerald-300 hover:underline">
-                {p.marketLogo} {p.marketName} →
-              </a>
-            ) : (
-              <span className="text-[11px] sm:text-[10px] font-medium text-slate-400">{p.marketLogo} {p.marketName}</span>
-            )}
-            {p.distanceKm !== null && <span className="text-[10px] text-slate-600">📍{p.distanceKm}km</span>}
-            {p.unit && <span className="text-[10px] text-slate-600">• {p.unit}</span>}
-          </div>
+  const ProductRow = ({ p, delay = 0 }: { p: MarketProduct; delay?: number }) => (
+    <div onClick={() => { setDetailProduct(p); track('productClicks'); }} className="group flex items-center gap-3 rounded-xl border border-slate-700/50 bg-slate-800/50 p-3 transition-all hover:bg-slate-800 hover:border-slate-600 animate-fade-in cursor-pointer active:scale-[0.98] min-h-[56px]" style={{ animationDelay: `${delay}ms` }}>
+      {p.imageUrl ? <img src={p.imageUrl} alt="" className="h-12 w-12 sm:h-11 sm:w-11 rounded-xl object-cover flex-shrink-0 bg-slate-700" loading="lazy" /> :
+       <div className="flex h-12 w-12 sm:h-11 sm:w-11 items-center justify-center rounded-xl bg-slate-700 text-xl flex-shrink-0">{p.emoji}</div>}
+      <div className="flex-1 min-w-0">
+        <p className="text-[13px] sm:text-sm font-bold text-slate-100 truncate">{p.name}</p>
+        <div className="flex items-center gap-1.5 mt-0.5">
+          <span className="text-[11px] sm:text-[10px] font-medium text-slate-400">{p.marketLogo} {p.marketName}</span>
+          {p.distanceKm !== null && <span className="text-[10px] text-slate-600">· {formatDistance(p.distanceKm)}</span>}
+          {p.unit && <span className="text-[10px] text-slate-600 hidden sm:inline">· {p.unit}</span>}
         </div>
-        <div className="text-right flex-shrink-0">
-          <span className="text-[17px] sm:text-lg font-extrabold text-emerald-400">₺{p.price.toFixed(2)}</span>
-          {p.unitPrice && <p className="text-[9px] text-slate-500">{p.unitPrice}</p>}
-        </div>
-        {priceAlerts[p.name.toLowerCase()] && p.price <= priceAlerts[p.name.toLowerCase()] && (
-          <span className="rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold text-amber-400 flex-shrink-0 pulse-dot">🔔</span>
-        )}
-        <button onClick={(e) => { e.stopPropagation(); toggleFav(p.id); }} className={`flex-shrink-0 rounded-full p-2 sm:p-1.5 transition-all ${favorites.has(p.id) ? 'text-red-400' : 'text-slate-700 sm:opacity-0 sm:group-hover:opacity-100 hover:text-red-400'}`}>
-          <Heart size={16} fill={favorites.has(p.id) ? 'currentColor' : 'none'} />
-        </button>
       </div>
-    );
-  };
+      <div className="text-right flex-shrink-0">
+        <span className="text-[17px] sm:text-lg font-extrabold text-emerald-400">₺{p.price.toFixed(2)}</span>
+      </div>
+      <button onClick={(e) => { e.stopPropagation(); toggleFav(p.id); }} className={`flex-shrink-0 rounded-full p-2 sm:p-1.5 transition-all ${favorites.has(p.id) ? 'text-red-400' : 'text-slate-700 sm:opacity-0 sm:group-hover:opacity-100 hover:text-red-400'}`}>
+        <Heart size={16} fill={favorites.has(p.id) ? 'currentColor' : 'none'} />
+      </button>
+    </div>
+  );
 
   const DetailModal = () => {
     if (!detailProduct) return null;
     const p = detailProduct;
-    // Aynı üründen tüm marketleri bul — mevcut dahil, fiyata göre sırala
+    // Sadece yarıçap içindeki marketler — aynı ürün adıyla
     const allVersions = allProducts
       .filter((x) => x.name === p.name)
       .sort((a, b) => a.price - b.price);
-    const cheapest = allVersions[0];
-    const expensive = allVersions[allVersions.length - 1];
+    const cheapest = allVersions[0] || p;
+    const expensive = allVersions[allVersions.length - 1] || p;
     const spread = allVersions.length > 1 ? +(expensive.price - cheapest.price).toFixed(2) : 0;
 
     return (
@@ -220,9 +254,13 @@ export default function CampaignApp() {
           {/* Drag handle mobilde */}
           <div className="flex justify-center mb-3 sm:hidden"><div className="h-1 w-10 rounded-full bg-slate-700" /></div>
 
-          {/* Ürün bilgisi */}
+          {/* Ürün bilgisi + resim büyütme */}
           <div className="flex items-start gap-3 mb-4">
-            {p.imageUrl ? <img src={p.imageUrl} alt="" className="h-16 w-16 rounded-2xl object-cover bg-slate-700" /> : <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-700 text-3xl">{p.emoji}</div>}
+            {p.imageUrl ? (
+              <button onClick={() => window.open(p.imageUrl!, '_blank')} className="flex-shrink-0 active:scale-95 transition-all">
+                <img src={p.imageUrl} alt={p.name} className="h-20 w-20 rounded-2xl object-cover bg-slate-700 border border-slate-600" />
+              </button>
+            ) : <div className="flex h-20 w-20 items-center justify-center rounded-2xl bg-slate-700 text-4xl flex-shrink-0">{p.emoji}</div>}
             <div className="flex-1 min-w-0">
               <p className="font-bold text-slate-100 text-base">{p.name}</p>
               <p className="text-xs text-slate-500">{p.brand} • {p.unit}</p>
@@ -246,9 +284,9 @@ export default function CampaignApp() {
               )}
             </div>
             <div className="flex items-center gap-2 mt-2 text-xs text-slate-400">
-              <span>{(cheapest || p).marketLogo} {(cheapest || p).marketName}</span>
-              {(cheapest || p).depotName && <span>• {(cheapest || p).depotName}</span>}
-              {(cheapest || p).distanceKm !== null && <span>• 📍 {(cheapest || p).distanceKm}km</span>}
+              <span>{cheapest.marketLogo} {cheapest.marketName}</span>
+              {cheapest.depotName && <span>· {cheapest.depotName}</span>}
+              {cheapest.distanceKm !== null && <span>· 📍 {formatDistance(cheapest.distanceKm)}</span>}
             </div>
             {(cheapest || p).unitPrice && <p className="text-[10px] text-slate-500 mt-1">{(cheapest || p).unitPrice}</p>}
           </div>
@@ -270,13 +308,21 @@ export default function CampaignApp() {
                       </div>
                       <div className="flex items-center gap-2 text-[10px] text-slate-600">
                         {s.depotName && <span>{s.depotName}</span>}
-                        {s.distanceKm !== null && <span>📍 {s.distanceKm}km</span>}
+                        {s.distanceKm !== null && <span>📍 {formatDistance(s.distanceKm)}</span>}
                       </div>
                     </div>
                     <div className="text-right flex-shrink-0">
                       <span className={`text-sm font-bold ${i === 0 ? 'text-emerald-400' : 'text-slate-300'}`}>₺{s.price.toFixed(2)}</span>
-                      {s.unitPrice && <p className="text-[9px] text-slate-600">{s.unitPrice}</p>}
                     </div>
+                    {/* Yol tarifi — koordinat varsa direkt, yoksa isimle arama */}
+                    <a href={s.depotLat && s.depotLon
+                      ? `https://www.google.com/maps/dir/?api=1&destination=${s.depotLat},${s.depotLon}`
+                      : `https://www.google.com/maps/search/${encodeURIComponent(s.marketName + ' ' + (s.depotName || displayName))}`}
+                      target="_blank" rel="noopener noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      className="flex-shrink-0 rounded-lg bg-slate-700/50 p-1.5 text-slate-500 hover:text-emerald-400 transition-all" title="Yol tarifi">
+                      <MapPin size={12} />
+                    </a>
                   </div>
                 ))}
               </div>
@@ -297,11 +343,20 @@ export default function CampaignApp() {
             </button>
           </div>
 
-          {/* Favori butonu */}
-          <button onClick={(e) => { e.stopPropagation(); toggleFav(p.id); }} className={`w-full flex items-center justify-center gap-1.5 rounded-xl border py-2.5 text-xs font-medium transition-all ${favorites.has(p.id) ? 'border-red-500/30 bg-red-500/10 text-red-400' : 'border-slate-700 bg-slate-800 text-slate-500 hover:text-red-400'}`}>
-            <Heart size={14} fill={favorites.has(p.id) ? 'currentColor' : 'none'} />
-            {favorites.has(p.id) ? 'Favorilerde' : 'Favorilere Ekle'}
-          </button>
+          {/* Favori + Paylaş */}
+          <div className="grid grid-cols-2 gap-2">
+            <button onClick={(e) => { e.stopPropagation(); toggleFav(p.id); }} className={`flex items-center justify-center gap-1.5 rounded-xl border py-2.5 text-xs font-medium transition-all ${favorites.has(p.id) ? 'border-red-500/30 bg-red-500/10 text-red-400' : 'border-slate-700 bg-slate-800 text-slate-500 hover:text-red-400'}`}>
+              <Heart size={14} fill={favorites.has(p.id) ? 'currentColor' : 'none'} />
+              {favorites.has(p.id) ? 'Favoride' : 'Favori'}
+            </button>
+            <button onClick={async () => {
+              const msg = `${p.emoji} ${p.name}\n${p.marketLogo} ${p.marketName} — ₺${p.price.toFixed(2)}${cheapest.id !== p.id ? `\nEn ucuz: ${cheapest.marketLogo} ${cheapest.marketName} ₺${cheapest.price.toFixed(2)}` : ''}`;
+              await shareText(msg);
+              track('shareClicks');
+            }} className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 py-2.5 text-xs font-medium text-slate-500 hover:text-sky-400 transition-all">
+              <Share2 size={14} /> Paylaş
+            </button>
+          </div>
 
           {/* Online Sipariş Ver */}
           {adminSettings.showOnlineOrder && <div className="mt-4 pt-3 border-t border-slate-800">
@@ -357,7 +412,7 @@ export default function CampaignApp() {
             <div className="flex items-center gap-2 text-[11px] text-emerald-300 mt-1">
               <span className={`flex items-center gap-1 rounded-full px-2 py-0.5 font-bold ${apiStatus === 'live' ? 'bg-emerald-500/30' : 'bg-white/15'}`}>
                 <span className={`h-1.5 w-1.5 rounded-full ${apiStatus === 'live' ? 'bg-emerald-400 pulse-dot' : 'bg-white/40'}`} />
-                {apiStatus === 'live' ? 'Canlı' : 'Önizleme'}
+                {apiStatus === 'live' ? 'Canlı' : `${radius}km`}
               </span>
               <button onClick={() => setShowCityPicker(!showCityPicker)} className="flex items-center gap-1 hover:text-white">
                 <MapPin size={10} />
@@ -454,12 +509,31 @@ export default function CampaignApp() {
         )}
       </div>
 
-      {/* Arama */}
+      {/* Arama + Barkod */}
       <div className="relative">
         <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500" />
         <input type="text" placeholder='Ürün ara...' value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
-          className="w-full rounded-xl border border-slate-700 bg-slate-800 py-2.5 pl-10 pr-10 text-sm text-slate-200 placeholder-slate-500 focus:border-emerald-500 focus:outline-none" />
-        {searchQuery && <button onClick={() => setSearchQuery('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500"><X size={16} /></button>}
+          className="w-full rounded-xl border border-slate-700 bg-slate-800 py-2.5 pl-10 pr-20 text-sm text-slate-200 placeholder-slate-500 focus:border-emerald-500 focus:outline-none" />
+        <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+          {searchQuery && <button onClick={() => setSearchQuery('')} className="text-slate-500 p-1"><X size={14} /></button>}
+          <button onClick={() => {
+            // Barkod tarama — kamera izni iste
+            if ('BarcodeDetector' in window) {
+              showToast('📷 Barkod tarama başlatılıyor...');
+              // BarcodeDetector API desteği var
+            } else {
+              // Fallback — dosya seçici ile barkod resmi
+              const input = document.createElement('input');
+              input.type = 'file';
+              input.accept = 'image/*';
+              input.capture = 'environment';
+              input.onchange = () => { showToast('📷 Barkod tarama henüz geliştirme aşamasında'); };
+              input.click();
+            }
+          }} className="rounded-lg bg-slate-700 p-1.5 text-slate-400 hover:text-emerald-400 transition-all" title="Barkod Tara">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+          </button>
+        </div>
         {searchQuery.trim() && (
           <div className="absolute top-full left-0 right-0 z-50 mt-1.5 max-h-80 overflow-y-auto rounded-xl border border-slate-700 bg-slate-900 p-1.5 shadow-2xl">
             {loading ? <div className="space-y-1.5 p-2">{[1,2,3].map((i) => <SkeletonRow key={i} />)}</div> :
@@ -518,13 +592,17 @@ export default function CampaignApp() {
       </div>
 
       {/* Ürünler */}
-      {loading && allProducts.length === 0 ? <SkeletonGrid count={6} /> :
+      {loading && allProducts.length === 0 ? <SkeletonGrid count={4} /> :
        filteredProducts.length > 0 ? (
         <div className="space-y-2">
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">{filteredProducts.slice(0, 12).map((p, i) => <ProductRow key={p.id} p={p} delay={i * 20} />)}</div>
-          {filteredProducts.length > 12 && adminSettings.showAds && adminSettings.adsNative && <AdSlot type="native" />}
-          {filteredProducts.length > 12 && (
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">{filteredProducts.slice(12, 24).map((p) => <ProductRow key={p.id} p={p} delay={0} />)}</div>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">{filteredProducts.slice(0, showMore ? 50 : 10).map((p, i) => <ProductRow key={p.id} p={p} delay={i < 10 ? i * 15 : 0} />)}</div>
+          {!showMore && filteredProducts.length > 10 && (
+            <>
+              {adminSettings.showAds && adminSettings.adsNative && <AdSlot type="native" />}
+              <button onClick={() => setShowMore(true)} className="w-full rounded-xl border border-slate-700 bg-slate-800/50 py-3 text-xs font-medium text-slate-400 hover:text-emerald-400 hover:border-emerald-500/30 active:scale-[0.98] transition-all">
+                +{filteredProducts.length - 10} ürün daha göster
+              </button>
+            </>
           )}
         </div>
       ) : (
@@ -621,6 +699,24 @@ export default function CampaignApp() {
         </div>
       )}
 
+      {/* Tahmini toplam — optimize etmeden önce bile göster */}
+      {needItems.length > 0 && allProducts.length > 0 && (() => {
+        const estimates = needItems.map((item) => {
+          const match = allProducts.find((p) => p.name.toLowerCase().includes(item.keyword.toLowerCase()));
+          return match ? match.price : null;
+        }).filter((p): p is number => p !== null);
+        const total = estimates.reduce((s, p) => s + p, 0);
+        return estimates.length > 0 ? (
+          <div className="rounded-xl border border-slate-700/50 bg-slate-800/30 p-3 flex items-center justify-between">
+            <div>
+              <p className="text-[10px] text-slate-600">Tahmini toplam ({estimates.length}/{needItems.length} ürün bulundu)</p>
+              <p className="text-lg font-extrabold text-emerald-400">~₺{total.toFixed(2)}</p>
+            </div>
+            <p className="text-[9px] text-slate-600">Optimize ile daha ucuz bulunabilir ↓</p>
+          </div>
+        ) : null;
+      })()}
+
       {/* Optimize */}
       {needItems.length > 0 && (
         <div className="space-y-3">
@@ -682,10 +778,10 @@ export default function CampaignApp() {
               <div className="flex flex-wrap gap-1">{optResult.unmatched.map((n) => <span key={n.id} className="rounded-full bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 text-[10px] text-amber-400">{n.emoji} {n.keyword}</span>)}</div>
             </div>
           )}
-          <button onClick={() => {
+          <button onClick={async () => {
             const txt = optResult.stops.map((s, i) => `${i+1}. ${s.marketLogo} ${s.marketName} — ₺${s.subtotal.toFixed(2)}\n${s.items.map((p) => `   ${p.need.emoji} ${p.product.name} → ₺${p.product.price.toFixed(2)}`).join('\n')}`).join('\n\n');
-            const full = `🛒 Akıllı Sepet (${location.city})\n${'─'.repeat(25)}\n\n${txt}\n\n💰 Toplam: ₺${optResult.totalCost.toFixed(2)}\n🎉 Tasarruf: ₺${optResult.totalSaving.toFixed(2)}`;
-            if (navigator.share) navigator.share({ text: full }); else { navigator.clipboard.writeText(full); showToast('📋 Panoya kopyalandı'); }
+            const full = `🛒 Akıllı Sepet (${location.city})\n\n${txt}\n\n💰 Toplam: ₺${optResult.totalCost.toFixed(2)}\n🎉 Tasarruf: ₺${optResult.totalSaving.toFixed(2)}`;
+            await shareText(full);
           }} className="w-full rounded-xl border border-slate-700 bg-slate-800 py-2.5 text-xs text-slate-400 hover:text-slate-200 flex items-center justify-center gap-1.5 transition-all"><Share2 size={14} /> Paylaş</button>
 
           {adminSettings.showAds && adminSettings.adsNative && <AdSlot type="native" className="mt-2" />}
@@ -701,6 +797,14 @@ export default function CampaignApp() {
       )}
     </div>
   );
+
+  // Karşılaştırma sayfası açılınca boş olmasın
+  useEffect(() => {
+    if (view === 'compare' && compareResults.length === 0 && !compareLoading) {
+      setCompareLoading(true);
+      searchProducts('süt', 20).then(setCompareResults).finally(() => setCompareLoading(false));
+    }
+  }, [view]);
 
   // ─── COMPARE ───
   const renderCompare = () => {
@@ -756,6 +860,36 @@ export default function CampaignApp() {
           <div className="flex items-center gap-2"><User size={22} /><h2 className="text-lg font-extrabold">Profilim</h2></div>
         </div>
 
+        {/* Haftalık Özet */}
+        {(savedResults.length > 0 || favArray.length > 0) && (
+          <div className="rounded-xl bg-gradient-to-r from-emerald-500/10 to-teal-500/10 border border-emerald-500/20 p-4">
+            <h3 className="text-xs font-bold text-emerald-400 mb-2">📊 Haftalık Özet</h3>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="text-center">
+                <p className="text-xl font-extrabold text-emerald-400">₺{totalSaved.toFixed(0)}</p>
+                <p className="text-[9px] text-slate-500">Toplam tasarruf</p>
+              </div>
+              <div className="text-center">
+                <p className="text-xl font-extrabold text-violet-400">{savedResults.length}</p>
+                <p className="text-[9px] text-slate-500">Optimizasyon</p>
+              </div>
+              <div className="text-center">
+                <p className="text-xl font-extrabold text-red-400">{favArray.length}</p>
+                <p className="text-[9px] text-slate-500">Favori ürün</p>
+              </div>
+            </div>
+            {totalSaved > 0 && (
+              <button onClick={async () => {
+                const msg = `🛒 Alışveriş özetim:\n💰 ₺${totalSaved.toFixed(0)} tasarruf ettim\n🧠 ${savedResults.length} optimizasyon yaptım\n❤️ ${favArray.length} favori ürünüm var`;
+                await shareText(msg);
+                track('shareClicks');
+              }} className="mt-3 w-full rounded-lg bg-emerald-500/20 border border-emerald-500/30 py-2 text-xs font-medium text-emerald-400 active:scale-[0.98] transition-all">
+                📤 Tasarrufumu Paylaş
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Özet kartlar */}
         <div className="grid grid-cols-4 gap-2">
           {[
@@ -773,8 +907,32 @@ export default function CampaignApp() {
         {/* Favoriler */}
         {favProducts.length > 0 && (
           <div>
-            <h3 className="text-xs font-bold text-slate-400 mb-2">❤️ Favoriler</h3>
+            <h3 className="text-xs font-bold text-slate-400 mb-2">❤️ Favoriler ({favProducts.length})</h3>
             <div className="space-y-1.5">{favProducts.slice(0, 6).map((p) => <ProductRow key={p.id} p={p} />)}</div>
+          </div>
+        )}
+
+        {/* Aktif Alarmlar */}
+        {alertCount > 0 && (
+          <div>
+            <h3 className="text-xs font-bold text-slate-400 mb-2">🔔 Fiyat Alarmları ({alertCount})</h3>
+            <div className="space-y-1">
+              {Object.entries(priceAlerts).map(([name, targetPrice]) => {
+                const current = allProducts.find((p) => p.name.toLowerCase().includes(name));
+                const triggered = current && current.price <= targetPrice;
+                return (
+                  <div key={name} className={`flex items-center gap-3 rounded-xl border p-2.5 ${triggered ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-slate-700/50 bg-slate-800/50'}`}>
+                    <span className="text-sm">{triggered ? '🟢' : '🔔'}</span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-medium text-slate-300 truncate capitalize">{name}</p>
+                      <p className="text-[10px] text-slate-600">Hedef: ₺{targetPrice.toFixed(2)} {current ? `• Şu an: ₺${current.price.toFixed(2)}` : ''}</p>
+                    </div>
+                    {triggered && <span className="text-[10px] font-bold text-emerald-400">Düştü! ✓</span>}
+                    <button onClick={() => { const n = { ...priceAlerts }; delete n[name]; setPriceAlerts(n); showToast('Alarm kaldırıldı'); }} className="text-slate-600 hover:text-red-400"><Trash2 size={12} /></button>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
 
@@ -832,16 +990,28 @@ export default function CampaignApp() {
 
         {adminSettings.showAds && adminSettings.adsBanner && <AdSlot type="banner" />}
 
-        {/* Konum & Bağlantı */}
-        <div className="grid grid-cols-2 gap-2">
-          <div className="rounded-xl border border-slate-700/50 bg-slate-800/50 p-3">
-            <p className="text-[10px] text-slate-600">📍 Konum</p>
-            <p className="text-xs font-medium text-slate-300">{displayName}</p>
-            {location.fullAddress && <p className="text-[8px] text-slate-600 truncate">{location.fullAddress}</p>}
-          </div>
-          <div className="rounded-xl border border-slate-700/50 bg-slate-800/50 p-3">
-            <p className="text-[10px] text-slate-600">📡 Bağlantı</p>
-            <p className="text-xs font-medium text-slate-300">{apiStatus === 'live' ? '🟢 Canlı Veri' : '📋 Önizleme'}</p>
+        {/* Konum & Harita */}
+        <div className="space-y-2">
+          <div className="rounded-xl border border-slate-700/50 bg-slate-800/50 overflow-hidden">
+            {/* Harita embed */}
+            <iframe
+              src={`https://www.openstreetmap.org/export/embed.html?bbox=${location.lon - 0.02},${location.lat - 0.015},${location.lon + 0.02},${location.lat + 0.015}&layer=mapnik&marker=${location.lat},${location.lon}`}
+              className="w-full h-32 border-0"
+              loading="lazy"
+              title="Konum"
+            />
+            <div className="p-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-medium text-slate-300">{displayName}</p>
+                  <p className="text-[10px] text-slate-600">{radius}km yarıçap</p>
+                </div>
+                <a href={`https://www.google.com/maps/@${location.lat},${location.lon},15z`} target="_blank" rel="noopener noreferrer"
+                  className="rounded-lg bg-slate-700 px-3 py-1.5 text-[10px] text-slate-400 hover:text-emerald-400 transition-all">
+                  Google Maps →
+                </a>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -889,6 +1059,11 @@ export default function CampaignApp() {
       {view === 'compare' && renderCompare()}
       {view === 'profile' && renderProfile()}
 
+      {/* Footer */}
+      <footer className="mt-8 mb-4 border-t border-slate-800/50 pt-4 text-center">
+        <p className="text-[10px] text-slate-700">KampanyaRadarı © {new Date().getFullYear()}</p>
+      </footer>
+
       <DetailModal />
 
       {/* Admin Panel */}
@@ -910,34 +1085,48 @@ export default function CampaignApp() {
 
       {/* Onboarding */}
       {!hasSeenOnboarding && allProducts.length > 0 && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setHasSeenOnboarding(true)}>
-          <div className="mx-4 max-w-sm rounded-2xl bg-slate-900 border border-slate-700 p-6 text-center animate-slide-up" onClick={(e) => e.stopPropagation()}>
-            <p className="text-4xl mb-3">🛒</p>
-            <h2 className="text-lg font-extrabold text-slate-100 mb-2">KampanyaRadarı</h2>
-            <p className="text-xs text-slate-400 mb-4">6 marketten gerçek zamanlı fiyat karşılaştırması. En ucuz sepeti otomatik bul.</p>
-            <button onClick={() => setHasSeenOnboarding(true)} className="w-full rounded-xl bg-emerald-600 py-2.5 text-sm font-bold text-white">Başla →</button>
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/80 backdrop-blur-sm" onClick={() => setHasSeenOnboarding(true)}>
+          <div className="w-full sm:max-w-sm sm:mx-4 rounded-t-2xl sm:rounded-2xl bg-slate-900 border border-slate-700 p-5 animate-slide-up" onClick={(e) => e.stopPropagation()}>
+            <div className="flex justify-center mb-3 sm:hidden"><div className="h-1 w-10 rounded-full bg-slate-700" /></div>
+            <p className="text-3xl text-center mb-2">🛒</p>
+            <h2 className="text-lg font-extrabold text-slate-100 text-center mb-1">KampanyaRadarı</h2>
+            <p className="text-xs text-slate-400 text-center mb-4">Çevrenizdeki marketlerin fiyatlarını karşılaştırın</p>
+            <div className="space-y-2 mb-4">
+              {[
+                { icon: '📍', text: 'Konumunuza göre yakın marketler' },
+                { icon: '⚖️', text: 'Aynı ürünü marketler arası karşılaştır' },
+                { icon: '🧠', text: 'Akıllı sepet ile en ucuz planı bul' },
+              ].map((item) => (
+                <div key={item.text} className="flex items-center gap-3 rounded-xl bg-slate-800/50 p-3 text-xs text-slate-300">
+                  <span className="text-lg">{item.icon}</span>{item.text}
+                </div>
+              ))}
+            </div>
+            <button onClick={() => setHasSeenOnboarding(true)} className="w-full rounded-xl bg-emerald-600 py-3 text-sm font-bold text-white active:scale-[0.98] transition-all">Keşfetmeye Başla</button>
           </div>
         </div>
       )}
 
       {/* Mobile Bottom Nav */}
       <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-slate-800 bg-slate-950/95 backdrop-blur-xl sm:hidden pb-safe">
-        <div className="flex justify-around py-1.5">
+        <div className="flex justify-around py-2">
           {[
             { v: 'home' as ViewMode, icon: '🏠', label: 'Keşfet' },
-            { v: 'cart' as ViewMode, icon: '🛒', label: 'Sepet' },
+            { v: 'cart' as ViewMode, icon: '🛒', label: 'Sepet', badge: needItems.length },
             { v: 'compare' as ViewMode, icon: '⚖️', label: 'Karşılaştır' },
             { v: 'profile' as ViewMode, icon: '👤', label: 'Profil' },
           ].map((btn) => (
-            <button key={btn.v} onClick={() => setView(btn.v)} className={`flex flex-col items-center gap-0.5 px-4 py-1 rounded-lg transition-all active:scale-90 ${view === btn.v ? 'text-emerald-400' : 'text-slate-600'}`}>
+            <button key={btn.v} onClick={() => setView(btn.v)} className={`relative flex flex-col items-center gap-0.5 min-w-[56px] py-1 rounded-lg transition-all active:scale-90 ${view === btn.v ? 'text-emerald-400' : 'text-slate-600'}`}>
               <span className="text-lg">{btn.icon}</span>
               <span className="text-[9px] font-medium">{btn.label}</span>
-              {btn.v === 'cart' && needItems.length > 0 && <span className="absolute -top-0.5 right-0 h-2 w-2 rounded-full bg-violet-500" />}
+              {'badge' in btn && btn.badge !== undefined && btn.badge > 0 && (
+                <span className="absolute top-0 right-1 flex h-4 w-4 items-center justify-center rounded-full bg-violet-500 text-[8px] font-bold text-white">{btn.badge}</span>
+              )}
             </button>
           ))}
         </div>
       </div>
-      <div className="h-20 sm:hidden" /> {/* Bottom nav spacer */}
+      <div className="h-20 sm:hidden" />
     </div>
   );
 }

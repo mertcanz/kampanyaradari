@@ -111,14 +111,18 @@ export function useLocation() {
     }
     save({ ...location, status: 'loading' });
     navigator.geolocation.getCurrentPosition(
-      async (pos) => {
+      (pos) => {
         const lat = +pos.coords.latitude.toFixed(5);
         const lon = +pos.coords.longitude.toFixed(5);
-        const geo = await reverseGeocode(lat, lon);
-        save({ lat, lon, district: geo.district, city: geo.city, fullAddress: geo.fullAddress, status: 'granted' });
+        // Hemen koordinatla kaydet, isim sonra gelsin
+        save({ lat, lon, district: '', city: 'Konumunuz', fullAddress: '', status: 'granted' });
+        // Arka planda semt adını bul
+        reverseGeocode(lat, lon).then((geo) => {
+          save({ lat, lon, district: geo.district, city: geo.city, fullAddress: geo.fullAddress, status: 'granted' });
+        }).catch(() => {});
       },
       () => { save({ ...location, status: 'denied' }); },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 300000 }
+      { enableHighAccuracy: false, timeout: 5000, maximumAge: 600000 }
     );
   };
 
@@ -126,13 +130,13 @@ export function useLocation() {
     save({ lat, lon, district, city, fullAddress: [district, city].filter(Boolean).join(', '), status: 'manual' });
   };
 
-  // İlk açılışta GPS dene
+  // İlk açılışta: kayıtlı varsa hemen kullan, yoksa GPS'i gecikmeyle iste
   useEffect(() => {
     const saved = loadSaved();
     if (saved.status === 'granted' || saved.status === 'manual') {
       setLocation(saved);
     } else {
-      requestGPS();
+      setTimeout(() => requestGPS(), 1500); // Sayfanın yüklenmesini bekleme
     }
   }, []);
 
