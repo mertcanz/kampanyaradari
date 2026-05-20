@@ -189,4 +189,16 @@ ALTER TABLE radar_price_history ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "radar_history_read" ON radar_price_history FOR SELECT USING (true);
 CREATE POLICY "radar_history_insert" ON radar_price_history FOR INSERT WITH CHECK (true);
 
+-- Admin ayarları (tek satır — tüm cihazlarda geçerli)
+CREATE TABLE radar_admin_settings (
+  id INTEGER PRIMARY KEY DEFAULT 1,
+  settings JSONB DEFAULT '{"showAds":true,"showAffiliate":true,"showOnlineOrder":true,"adsBanner":true,"adsNative":true,"adsBetween":true}',
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+INSERT INTO radar_admin_settings (id, settings) VALUES (1, '{"showAds":true,"showAffiliate":true,"showOnlineOrder":true,"adsBanner":true,"adsNative":true,"adsBetween":true}');
+
+ALTER TABLE radar_admin_settings ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "radar_admin_read" ON radar_admin_settings FOR SELECT USING (true);
+CREATE POLICY "radar_admin_update" ON radar_admin_settings FOR UPDATE USING (true);
+
 */

@@ -8,25 +8,29 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="mobile-web-app-capable" content="yes" />
 
-    <title>KampanyaRadarı — En Ucuz Market Fiyatları | A101 BİM ŞOK Migros</title>
-    <meta name="description" content="A101, BİM, ŞOK, Migros, CarrefourSA ve Tarım Kredi marketlerindeki fiyatları karşılaştır. Akıllı sepet ile en ucuz alışveriş planını oluştur. TÜBİTAK verisi ile gerçek zamanlı fiyatlar." />
-    <meta name="keywords" content="market fiyat karşılaştırma, en ucuz market, A101 fiyatları, BİM fiyatları, ŞOK fiyatları, Migros fiyatları, CarrefourSA, market kampanya, ucuz alışveriş, akıllı sepet, TÜBİTAK market fiyatı, kampanya radarı" />
+    <title>KampanyaRadarı — En Ucuz Market Fiyatları | A101 BİM ŞOK Migros Karşılaştır</title>
+    <meta name="description" content="A101, BİM, ŞOK, Migros, CarrefourSA marketlerindeki fiyatları anında karşılaştır. Akıllı sepet ile en ucuz alışveriş planını otomatik oluştur. Konumuna göre en yakın marketleri bul." />
+    <meta name="keywords" content="market fiyat karşılaştırma, en ucuz market, A101 fiyatları, BİM fiyatları, ŞOK fiyatları, Migros fiyatları, CarrefourSA fiyatları, ucuz alışveriş, akıllı sepet, kampanya radarı, market kampanya, fiyat takip" />
     <meta name="author" content="KampanyaRadarı" />
-    <meta name="robots" content="index, follow" />
+    <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large" />
     <link rel="canonical" href="https://kampanyaradari.vercel.app" />
+
+    <!-- Preconnect -->
+    <link rel="preconnect" href="https://kampanyaradari.vercel.app" />
+    <link rel="dns-prefetch" href="https://api.marketfiyati.org.tr" />
 
     <!-- Open Graph -->
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://kampanyaradari.vercel.app" />
     <meta property="og:title" content="KampanyaRadarı — En Ucuz Market Fiyatları" />
-    <meta property="og:description" content="6 büyük marketten gerçek zamanlı fiyat karşılaştırması. Akıllı sepet ile en ucuz alışveriş planını otomatik oluştur." />
+    <meta property="og:description" content="6 marketten gerçek zamanlı fiyat karşılaştırması. Konumuna göre en yakın marketleri bul. Akıllı sepet ile tasarruf et." />
     <meta property="og:locale" content="tr_TR" />
     <meta property="og:site_name" content="KampanyaRadarı" />
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="KampanyaRadarı — En Ucuz Market Fiyatları" />
-    <meta name="twitter:description" content="A101, BİM, ŞOK, Migros fiyatlarını karşılaştır. Akıllı sepet ile tasarruf et." />
+    <meta name="twitter:description" content="A101, BİM, ŞOK, Migros fiyatlarını karşılaştır. Konumuna göre en yakın ve ucuz marketi bul." />
 
     <!-- Structured Data -->
     <script type="application/ld+json">
@@ -35,23 +39,72 @@
       "@type": "WebApplication",
       "name": "KampanyaRadarı",
       "url": "https://kampanyaradari.vercel.app",
-      "description": "Türkiye'deki zincir marketlerin fiyatlarını karşılaştırın, en ucuz alışveriş planını otomatik oluşturun.",
+      "description": "Türkiye'deki zincir marketlerin fiyatlarını karşılaştırın. Konumunuza göre en yakın ve ucuz marketleri bulun.",
       "applicationCategory": "ShoppingApplication",
       "operatingSystem": "Web",
+      "inLanguage": "tr",
       "offers": {
         "@type": "Offer",
         "price": "0",
         "priceCurrency": "TRY"
-      },
-      "author": {
-        "@type": "Organization",
-        "name": "KampanyaRadarı"
       }
+    }
+    </script>
+
+    <!-- FAQ Structured Data — Google'da sık sorulan sorular -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "En ucuz market hangisi?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "KampanyaRadarı ile A101, BİM, ŞOK, Migros, CarrefourSA ve Tarım Kredi marketlerinin fiyatlarını karşılaştırabilir, konumunuza en yakın ve en ucuz marketi bulabilirsiniz."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Market fiyatlarını nasıl karşılaştırabilirim?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "KampanyaRadarı'nda ürün arayın veya kategori seçin. Aynı ürünün farklı marketlerdeki fiyatlarını anında görün. Akıllı sepet ile alışveriş listenizi optimize edin."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Hangi marketlerin fiyatları var?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "A101, BİM, ŞOK, Migros, CarrefourSA ve Tarım Kredi marketlerinin güncel fiyatları mevcuttur."
+          }
+        }
+      ]
     }
     </script>
   </head>
   <body>
     <div id="root"></div>
+    <!-- SEO: Noscript fallback — JS çalışmayan botlar için -->
+    <noscript>
+      <div style="padding:40px;text-align:center;font-family:sans-serif;background:#020617;color:#94a3b8;min-height:100vh">
+        <h1 style="color:#34d399">KampanyaRadarı</h1>
+        <p>En ucuz market fiyatlarını karşılaştırın</p>
+        <p>A101, BİM, ŞOK, Migros, CarrefourSA fiyat karşılaştırma</p>
+        <p>Akıllı sepet ile en ucuz alışveriş planını oluşturun</p>
+        <ul style="text-align:left;max-width:400px;margin:20px auto">
+          <li>Süt fiyat karşılaştırma</li>
+          <li>Yumurta fiyat karşılaştırma</li>
+          <li>Domates fiyat karşılaştırma</li>
+          <li>Ekmek fiyat karşılaştırma</li>
+          <li>Tavuk fiyat karşılaştırma</li>
+          <li>Peynir fiyat karşılaştırma</li>
+          <li>Deterjan fiyat karşılaştırma</li>
+        </ul>
+      </div>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

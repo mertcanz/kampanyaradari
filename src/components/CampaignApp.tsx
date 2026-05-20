@@ -23,11 +23,34 @@ import { getMarketLink, getTrendyolLink, getHepsiburadaLink } from '../utils/mar
 import { trackSupabaseEvent } from '../lib/supabase';
 import { formatDistance } from '../api/market-api';
 import { updatePageMeta, pageMeta } from '../utils/seo';
+import { parseHash, setHash } from '../utils/router';
+import { ProductPage, CategoryPage, MarketPage } from './SeoPages';
 
-type ViewMode = 'home' | 'cart' | 'compare' | 'profile';
+type ViewMode = 'home' | 'cart' | 'compare' | 'profile' | 'product' | 'category' | 'market';
 
 export default function CampaignApp() {
-  const [view, setView] = useState<ViewMode>('home');
+  const [routeSlug, setRouteSlug] = useState('');
+  const [view, setViewState] = useState<ViewMode>('home');
+
+  // Router — URL hash'i dinle
+  const setView = (v: ViewMode, slug?: string) => {
+    setViewState(v);
+    if (slug) setRouteSlug(slug);
+    setHash({ page: v, slug });
+  };
+
+  useEffect(() => {
+    const onHash = () => {
+      const route = parseHash();
+      setViewState(route.page as ViewMode);
+      setRouteSlug(route.slug || '');
+    };
+    window.addEventListener('hashchange', onHash);
+    // İlk yüklemede URL'yi oku
+    const initial = parseHash();
+    if (initial.page !== 'home') { setViewState(initial.page as ViewMode); setRouteSlug(initial.slug || ''); }
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<MarketProduct[]>([]);
   const [allProducts, setAllProducts] = useState<MarketProduct[]>([]);
@@ -314,13 +337,13 @@ export default function CampaignApp() {
                     <div className="text-right flex-shrink-0">
                       <span className={`text-sm font-bold ${i === 0 ? 'text-emerald-400' : 'text-slate-300'}`}>₺{s.price.toFixed(2)}</span>
                     </div>
-                    {/* Yol tarifi — koordinat varsa direkt, yoksa isimle arama */}
+                    {/* Yol tarifi */}
                     <a href={s.depotLat && s.depotLon
                       ? `https://www.google.com/maps/dir/?api=1&destination=${s.depotLat},${s.depotLon}`
                       : `https://www.google.com/maps/search/${encodeURIComponent(s.marketName + ' ' + (s.depotName || displayName))}`}
                       target="_blank" rel="noopener noreferrer"
                       onClick={(e) => e.stopPropagation()}
-                      className="flex-shrink-0 rounded-lg bg-slate-700/50 p-1.5 text-slate-500 hover:text-emerald-400 transition-all" title="Yol tarifi">
+                      className="flex-shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-lg bg-slate-700/50 text-slate-500 hover:text-emerald-400 transition-all" title="Yol tarifi">
                       <MapPin size={12} />
                     </a>
                   </div>
@@ -409,20 +432,21 @@ export default function CampaignApp() {
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
             <div className="flex items-center gap-2"><BadgePercent size={20} /><h1 className="text-lg font-extrabold sm:text-xl">KampanyaRadarı</h1></div>
-            <div className="flex items-center gap-2 text-[11px] text-emerald-300 mt-1">
-              <span className={`flex items-center gap-1 rounded-full px-2 py-0.5 font-bold ${apiStatus === 'live' ? 'bg-emerald-500/30' : 'bg-white/15'}`}>
-                <span className={`h-1.5 w-1.5 rounded-full ${apiStatus === 'live' ? 'bg-emerald-400 pulse-dot' : 'bg-white/40'}`} />
+            <div className="flex items-center gap-2 text-[11px] text-emerald-300 mt-1 flex-wrap">
+              <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-bold ${apiStatus === 'live' ? 'bg-emerald-500/30' : 'bg-white/15'}`}>
+                <span className={`inline-block h-1.5 w-1.5 rounded-full flex-shrink-0 ${apiStatus === 'live' ? 'bg-emerald-400 pulse-dot' : 'bg-white/40'}`} />
                 {apiStatus === 'live' ? 'Canlı' : `${radius}km`}
               </span>
-              <button onClick={() => setShowCityPicker(!showCityPicker)} className="flex items-center gap-1 hover:text-white">
-                <MapPin size={10} />
-                {location.status === 'loading' ? <span className="flex items-center gap-1"><RefreshCw size={9} className="animate-spin" />Konum alınıyor...</span> :
-                 location.status === 'denied' ? <span>📍 Konum seç</span> :
-                 <span>{displayName} <span className="text-emerald-400/60">({radius}km)</span></span>}
+              <button onClick={() => setShowCityPicker(!showCityPicker)} className="inline-flex items-center gap-1 hover:text-white">
+                <MapPin size={10} className="flex-shrink-0" />
+                {location.status === 'loading' ? <span className="inline-flex items-center gap-1"><RefreshCw size={9} className="flex-shrink-0 animate-spin" />Konum...</span> :
+                 location.status === 'denied' ? <span>Konum seç</span> :
+                 <span className="truncate max-w-[120px]">{displayName}</span>}
               </button>
-              <span>•</span>
-              <button onClick={loadPopular} className={loading ? 'animate-spin' : ''}><RefreshCw size={10} /></button>
-              <span className="text-emerald-400/60">{timeSince(lastRefresh)}</span>
+              <button onClick={loadPopular} className="inline-flex items-center gap-1 flex-shrink-0">
+                <RefreshCw size={10} className={`flex-shrink-0 ${loading ? 'animate-spin' : ''}`} />
+                <span className="text-emerald-400/60">{timeSince(lastRefresh)}</span>
+              </button>
             </div>
           </div>
           <button onClick={() => setView('cart')} className="flex items-center gap-1.5 rounded-xl bg-white px-3 py-2 text-xs font-bold text-emerald-700 shadow hover:scale-105 active:scale-95 transition-all">
@@ -509,31 +533,23 @@ export default function CampaignApp() {
         )}
       </div>
 
-      {/* Arama + Barkod */}
+      {/* Sponsorlu market mesajı */}
+      {adminSettings.sponsoredMarket && adminSettings.sponsoredMessage && (
+        <div className="rounded-xl bg-gradient-to-r from-amber-500/10 to-orange-500/10 border border-amber-500/20 p-3 flex items-center gap-3">
+          <span className="text-lg">⭐</span>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-medium text-amber-300">{adminSettings.sponsoredMessage}</p>
+            <p className="text-[9px] text-slate-600">Sponsorlu</p>
+          </div>
+        </div>
+      )}
+
+      {/* Arama */}
       <div className="relative">
         <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500" />
-        <input type="text" placeholder='Ürün ara...' value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
-          className="w-full rounded-xl border border-slate-700 bg-slate-800 py-2.5 pl-10 pr-20 text-sm text-slate-200 placeholder-slate-500 focus:border-emerald-500 focus:outline-none" />
-        <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
-          {searchQuery && <button onClick={() => setSearchQuery('')} className="text-slate-500 p-1"><X size={14} /></button>}
-          <button onClick={() => {
-            // Barkod tarama — kamera izni iste
-            if ('BarcodeDetector' in window) {
-              showToast('📷 Barkod tarama başlatılıyor...');
-              // BarcodeDetector API desteği var
-            } else {
-              // Fallback — dosya seçici ile barkod resmi
-              const input = document.createElement('input');
-              input.type = 'file';
-              input.accept = 'image/*';
-              input.capture = 'environment';
-              input.onchange = () => { showToast('📷 Barkod tarama henüz geliştirme aşamasında'); };
-              input.click();
-            }
-          }} className="rounded-lg bg-slate-700 p-1.5 text-slate-400 hover:text-emerald-400 transition-all" title="Barkod Tara">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-          </button>
-        </div>
+        <input type="text" placeholder='Ürün ara... (süt, domates, deterjan)' value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
+          className="w-full rounded-xl border border-slate-700 bg-slate-800 py-3 pl-10 pr-10 text-sm text-slate-200 placeholder-slate-500 focus:border-emerald-500 focus:outline-none" />
+        {searchQuery && <button onClick={() => setSearchQuery('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 p-1"><X size={16} /></button>}
         {searchQuery.trim() && (
           <div className="absolute top-full left-0 right-0 z-50 mt-1.5 max-h-80 overflow-y-auto rounded-xl border border-slate-700 bg-slate-900 p-1.5 shadow-2xl">
             {loading ? <div className="space-y-1.5 p-2">{[1,2,3].map((i) => <SkeletonRow key={i} />)}</div> :
@@ -559,7 +575,7 @@ export default function CampaignApp() {
         <div className="flex gap-1.5 overflow-x-auto scrollbar-hide">
           <button onClick={() => setHomeMarketFilter('all')} className={`rounded-full px-3 py-2 sm:px-2.5 sm:py-1.5 text-xs sm:text-[11px] font-medium flex-shrink-0 transition-all border active:scale-95 ${homeMarketFilter === 'all' ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40' : 'bg-slate-800/50 text-slate-400 border-slate-700/50'}`}>Tümü</button>
           {marketStats.map(([mid, info]) => (
-            <button key={mid} onClick={() => setHomeMarketFilter(mid)} className={`rounded-full px-3 py-2 sm:px-2.5 sm:py-1.5 text-xs sm:text-[11px] font-medium flex-shrink-0 transition-all border active:scale-95 ${homeMarketFilter === mid ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40' : 'bg-slate-800/50 text-slate-400 border-slate-700/50'}`}>
+            <button key={mid} onClick={() => setView('market', mid)} className="rounded-full px-3 py-2 sm:px-2.5 sm:py-1.5 text-xs sm:text-[11px] font-medium flex-shrink-0 transition-all border active:scale-95 bg-slate-800/50 text-slate-400 border-slate-700/50 hover:text-emerald-400 hover:border-emerald-500/40">
               {info.logo} {info.name}
             </button>
           ))}
@@ -567,7 +583,7 @@ export default function CampaignApp() {
         <div className="flex gap-1.5 overflow-x-auto scrollbar-hide">
           <button onClick={() => setHomeCategoryFilter('all')} className={`rounded-full px-3 py-2 sm:px-2.5 sm:py-1.5 text-xs sm:text-[11px] font-medium flex-shrink-0 transition-all border active:scale-95 ${homeCategoryFilter === 'all' ? 'bg-violet-500/15 text-violet-400 border-violet-500/40' : 'bg-slate-800/50 text-slate-400 border-slate-700/50'}`}>🧺 Tümü</button>
           {productCategories.filter((c) => c.count > 0).map((cat) => (
-            <button key={cat.id} onClick={() => setHomeCategoryFilter(cat.id)} className={`rounded-full px-3 py-2 sm:px-2.5 sm:py-1.5 text-xs sm:text-[11px] font-medium flex-shrink-0 transition-all border active:scale-95 ${homeCategoryFilter === cat.id ? 'bg-violet-500/15 text-violet-400 border-violet-500/40' : 'bg-slate-800/50 text-slate-400 border-slate-700/50'}`}>
+            <button key={cat.id} onClick={() => setView('category', cat.id)} className="rounded-full px-3 py-2 sm:px-2.5 sm:py-1.5 text-xs sm:text-[11px] font-medium flex-shrink-0 transition-all border active:scale-95 bg-slate-800/50 text-slate-400 border-slate-700/50 hover:text-violet-400 hover:border-violet-500/40">
               {cat.emoji} {cat.name}
             </button>
           ))}
@@ -582,14 +598,16 @@ export default function CampaignApp() {
         </div>
       </div>
 
-      {/* Ürün sayısı göstergesi */}
-      <div className="flex items-center justify-between">
-        <p className="text-[11px] text-slate-500">
-          {filteredProducts.length > 0 ? `${filteredProducts.length} ürün` : ''}
-          {(homeMarketFilter !== 'all' || homeCategoryFilter !== 'all') && ' (filtreli)'}
-        </p>
-        {loading && allProducts.length > 0 && <RefreshCw size={12} className="text-slate-600 animate-spin" />}
-      </div>
+      {/* Ürün sayısı */}
+      {(filteredProducts.length > 0 || loading) && (
+        <div className="flex items-center justify-between">
+          <p className="text-[11px] text-slate-600">
+            {filteredProducts.length} ürün
+            {(homeMarketFilter !== 'all' || homeCategoryFilter !== 'all') && ' · filtreli'}
+          </p>
+          {loading && <RefreshCw size={11} className="text-slate-700 animate-spin flex-shrink-0" />}
+        </div>
+      )}
 
       {/* Ürünler */}
       {loading && allProducts.length === 0 ? <SkeletonGrid count={4} /> :
@@ -789,10 +807,21 @@ export default function CampaignApp() {
       )}
 
       {needItems.length === 0 && !optResult && (
-        <div className="rounded-xl border-2 border-dashed border-slate-700 p-8 text-center">
-          <ShoppingCart size={40} className="mx-auto text-slate-700 mb-2" />
+        <div className="rounded-xl border border-dashed border-slate-700 p-6 text-center">
+          <ShoppingCart size={36} className="mx-auto text-slate-700 mb-2" />
           <p className="text-sm text-slate-400 font-medium">Sepetiniz boş</p>
-          <p className="text-xs text-slate-600 mt-1">Ürün ekleyin veya hazır liste seçin</p>
+          <p className="text-xs text-slate-600 mt-1 mb-3">Ürün ekleyin, hazır liste seçin veya listeyi yapıştırın</p>
+          <div className="flex gap-2 justify-center">
+            {shoppingPresets.slice(0, 2).map((preset) => (
+              <button key={preset.id} onClick={() => {
+                const ex = new Set(needItems.map((n) => n.keyword.toLowerCase()));
+                setNeedItems((prev: NeedItem[]) => [...prev, ...preset.items.filter((i) => !ex.has(i.keyword.toLowerCase())).map((i) => ({ ...i, id: `n-${Date.now()}-${Math.random()}` }))]);
+                showToast(`${preset.emoji} ${preset.name} eklendi`);
+              }} className="rounded-lg bg-violet-500/10 border border-violet-500/30 px-3 py-2 text-xs text-violet-400 active:scale-95">
+                {preset.emoji} {preset.name}
+              </button>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -993,13 +1022,15 @@ export default function CampaignApp() {
         {/* Konum & Harita */}
         <div className="space-y-2">
           <div className="rounded-xl border border-slate-700/50 bg-slate-800/50 overflow-hidden">
-            {/* Harita embed */}
-            <iframe
-              src={`https://www.openstreetmap.org/export/embed.html?bbox=${location.lon - 0.02},${location.lat - 0.015},${location.lon + 0.02},${location.lat + 0.015}&layer=mapnik&marker=${location.lat},${location.lon}`}
-              className="w-full h-32 border-0"
-              loading="lazy"
-              title="Konum"
-            />
+            {/* Harita — sadece profil açıkken yükle */}
+            {view === 'profile' && (
+              <iframe
+                src={`https://www.openstreetmap.org/export/embed.html?bbox=${location.lon - 0.02},${location.lat - 0.015},${location.lon + 0.02},${location.lat + 0.015}&layer=mapnik&marker=${location.lat},${location.lon}`}
+                className="w-full h-28 border-0"
+                loading="lazy"
+                title="Konum"
+              />
+            )}
             <div className="p-3">
               <div className="flex items-center justify-between">
                 <div>
@@ -1058,11 +1089,9 @@ export default function CampaignApp() {
       {view === 'cart' && renderCart()}
       {view === 'compare' && renderCompare()}
       {view === 'profile' && renderProfile()}
-
-      {/* Footer */}
-      <footer className="mt-8 mb-4 border-t border-slate-800/50 pt-4 text-center">
-        <p className="text-[10px] text-slate-700">KampanyaRadarı © {new Date().getFullYear()}</p>
-      </footer>
+      {view === 'product' && <ProductPage slug={routeSlug} onBack={() => setView('home')} />}
+      {view === 'category' && <CategoryPage slug={routeSlug} onBack={() => setView('home')} />}
+      {view === 'market' && <MarketPage slug={routeSlug} onBack={() => setView('home')} />}
 
       <DetailModal />
 
