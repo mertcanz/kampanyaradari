@@ -1,6 +1,5 @@
 // ─── Market API - TÜBİTAK marketfiyati.org.tr ───
 
-import { generateLivePrices, type LiveProduct } from '../engine/dynamic-pricing';
 import { resolveMarket, getProductEmoji } from '../data/markets';
 import { recordPrices } from '../hooks/usePriceHistory';
 
@@ -8,7 +7,7 @@ const BACKEND_URL = 'https://kampanyaradari.vercel.app';
 
 // ─── State ───
 
-export type ConnectionStatus = 'live' | 'simulation' | 'connecting' | 'error';
+export type ConnectionStatus = 'live' | 'connecting' | 'error';
 
 interface APIState {
   status: ConnectionStatus;
@@ -27,7 +26,7 @@ function updateState(p: Partial<APIState>) { currentState = { ...currentState, .
 let lat = 41.0082;
 let lon = 28.9784;
 let radius = 3;
-let locationVersion = 0; // her konum/yarıçap değişiminde artar
+let locationVersion = 0;
 
 export function setAPILocation(newLat: number, newLon: number, newRadius?: number) {
   const changed = newLat !== lat || newLon !== lon || (newRadius !== undefined && newRadius !== radius);
@@ -36,7 +35,7 @@ export function setAPILocation(newLat: number, newLon: number, newRadius?: numbe
     lon = newLon;
     if (newRadius !== undefined) radius = newRadius;
     locationVersion++;
-    cachedAll = []; // cache invalidate
+    cachedAll = [];
   }
 }
 
@@ -76,7 +75,7 @@ export interface MarketProduct {
   discountRatio: number | null;
   promotionText: string | null;
   indexTime: string;
-  source: 'api' | 'simulation';
+  source: 'api';
 }
 
 // ─── Distance helpers ───
@@ -130,53 +129,6 @@ function parseTubitak(data: Record<string, unknown>): MarketProduct[] {
   return products;
 }
 
-// ─── Simulation (yarıçap/konum bazlı filtrele) ───
-
-function getSimProducts(): MarketProduct[] {
-  const sim = generateLivePrices();
-
-  // Fallback'te yarıçapa göre yaklaşık market çeşitliliği
-  const marketsByRadius: Record<number, string[]> = {
-    1: ['a101', 'bim', 'sok'],
-    3: ['a101', 'bim', 'sok', 'migros'],
-    5: ['a101', 'bim', 'sok', 'migros', 'carrefour', 'tarim_kredi'],
-    10: ['a101', 'bim', 'sok', 'migros', 'carrefour', 'tarim_kredi', 'getir'],
-  };
-  const allowedMarkets = new Set(marketsByRadius[radius] || marketsByRadius[3]);
-  const filtered = sim.filter((p) => allowedMarkets.has(p.marketId));
-
-  return filtered.map((p: LiveProduct, idx: number) => {
-    const market = resolveMarket(p.marketId);
-    const fakeDist = +(0.15 + (idx * 0.12) % Math.max(radius * 0.85, 0.7)).toFixed(2);
-    return {
-      id: p.id,
-      name: p.name,
-      brand: p.brand,
-      category: p.category,
-      menuCategory: '',
-      emoji: p.emoji,
-      unit: p.unit,
-      imageUrl: null,
-      marketId: market.id,
-      marketName: market.name,
-      marketLogo: market.logo,
-      marketColor: market.color,
-      depotName: `${market.name} Şube`,
-      depotLat: null,
-      depotLon: null,
-      distanceKm: fakeDist,
-      price: p.currentPrice,
-      unitPrice: '',
-      unitPriceValue: null,
-      discount: p.currentPrice < p.basePrice * 0.85,
-      discountRatio: Math.round((1 - p.currentPrice / p.basePrice) * 100),
-      promotionText: null,
-      indexTime: '',
-      source: 'simulation' as const,
-    };
-  });
-}
-
 // ─── URL ───
 
 function buildUrl(query: string, size: number): string {
@@ -191,81 +143,76 @@ let cachedVersion = -1;
 export async function loadAllProducts(): Promise<MarketProduct[]> {
   if (cachedAll.length > 0 && cachedVersion === locationVersion) return cachedAll;
 
+  updateState({ status: 'connecting', source: 'Bağlanıyor...', productCount: 0 });
+
   const phase1 = ['süt', 'domates', 'ekmek', 'yumurta'];
   const phase2 = ['tavuk', 'peynir', 'makarna', 'deterjan'];
-  const essentials = phase1;
 
-  try {
-    const results = await Promise.allSettled(
-      essentials.map(async (q) => {
-        const res = await fetch(buildUrl(q, 8), { signal: AbortSignal.timeout(8000) });
-        if (!res.ok) throw new Error(`${res.status}`);
-        return parseTubitak(await res.json());
-      })
-    );
+  const results = await Promise.allSettled(
+    phase1.map(async (q) => {
+      const res = await fetch(buildUrl(q, 8), { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return parseTubitak(await res.json());
+    })
+  );
 
-    // Her ürün adı için sadece EN YAKIN marketi tut
-    const bestPerProduct = new Map<string, MarketProduct>();
-    for (const r of results) {
-      if (r.status === 'fulfilled') {
-        for (const p of r.value) {
-          // Ürün adı bazlı — her üründen 1 tane (en yakın)
-          const key = `${p.name}-${p.marketId}`;
-          const existing = bestPerProduct.get(key);
-          if (!existing) {
+  const bestPerProduct = new Map<string, MarketProduct>();
+  for (const r of results) {
+    if (r.status === 'fulfilled') {
+      for (const p of r.value) {
+        const key = `${p.name}-${p.marketId}`;
+        const existing = bestPerProduct.get(key);
+        if (!existing) {
+          bestPerProduct.set(key, p);
+        } else {
+          const pDist = p.distanceKm ?? 9999;
+          const eDist = existing.distanceKm ?? 9999;
+          if (pDist < eDist || (pDist === eDist && p.price < existing.price)) {
             bestPerProduct.set(key, p);
-          } else {
-            const pDist = p.distanceKm ?? 9999;
-            const eDist = existing.distanceKm ?? 9999;
-            if (pDist < eDist || (pDist === eDist && p.price < existing.price)) {
-              bestPerProduct.set(key, p);
-            }
           }
         }
       }
     }
+  }
 
-    const all = Array.from(bestPerProduct.values()).sort((a, b) => (a.distanceKm ?? 99) - (b.distanceKm ?? 99));
+  const all = Array.from(bestPerProduct.values()).sort((a, b) => (a.distanceKm ?? 99) - (b.distanceKm ?? 99));
 
-    if (all.length > 0) {
-      cachedAll = all;
-      cachedVersion = locationVersion;
-      recordPrices(all);
-      updateState({ status: 'live', lastUpdate: new Date(), source: `${radius}km`, productCount: all.length });
+  if (all.length === 0) {
+    const errors = results.filter((r) => r.status === 'rejected').map((r) => (r as PromiseRejectedResult).reason?.message).join(', ');
+    updateState({ status: 'error', source: errors || 'API yanıt vermedi', productCount: 0 });
+    return [];
+  }
 
-      // Phase 2 — arka planda geri kalanları yükle
-      setTimeout(async () => {
-        try {
-          const p2Results = await Promise.allSettled(
-            phase2.map(async (q) => {
-              const res = await fetch(buildUrl(q, 10), { signal: AbortSignal.timeout(15000) });
-              if (!res.ok) throw new Error(`${res.status}`);
-              return parseTubitak(await res.json());
-            })
-          );
-          const existing = new Map(cachedAll.map((p) => [`${p.name}-${p.marketId}`, p]));
-          for (const r of p2Results) {
-            if (r.status === 'fulfilled') {
-              for (const p of r.value) {
-                const key = `${p.name}-${p.marketId}`;
-                if (!existing.has(key)) { existing.set(key, p); }
-              }
-            }
-          }
-          cachedAll = Array.from(existing.values()).sort((a, b) => (a.distanceKm ?? 99) - (b.distanceKm ?? 99));
-          updateState({ status: 'live', lastUpdate: new Date(), source: `${radius}km`, productCount: cachedAll.length });
-        } catch { /**/ }
-      }, 500);
-
-      return all;
-    }
-  } catch { /**/ }
-
-  // Simülasyon — sadece bir kez hesapla
-  if (cachedAll.length === 0) cachedAll = getSimProducts();
+  cachedAll = all;
   cachedVersion = locationVersion;
-  updateState({ status: 'simulation', lastUpdate: new Date(), source: `${radius}km`, productCount: cachedAll.length });
-  return cachedAll;
+  recordPrices(all);
+  updateState({ status: 'live', lastUpdate: new Date(), source: `${radius}km`, productCount: all.length });
+
+  // Phase 2 — arka planda geri kalanları yükle
+  setTimeout(async () => {
+    try {
+      const p2Results = await Promise.allSettled(
+        phase2.map(async (q) => {
+          const res = await fetch(buildUrl(q, 10), { signal: AbortSignal.timeout(15000) });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return parseTubitak(await res.json());
+        })
+      );
+      const existing = new Map(cachedAll.map((p) => [`${p.name}-${p.marketId}`, p]));
+      for (const r of p2Results) {
+        if (r.status === 'fulfilled') {
+          for (const p of r.value) {
+            const key = `${p.name}-${p.marketId}`;
+            if (!existing.has(key)) existing.set(key, p);
+          }
+        }
+      }
+      cachedAll = Array.from(existing.values()).sort((a, b) => (a.distanceKm ?? 99) - (b.distanceKm ?? 99));
+      updateState({ status: 'live', lastUpdate: new Date(), source: `${radius}km`, productCount: cachedAll.length });
+    } catch { /**/ }
+  }, 500);
+
+  return all;
 }
 
 // ─── Search ───
@@ -274,23 +221,18 @@ export async function searchProducts(query: string, size = 30): Promise<MarketPr
   if (!query.trim()) return loadAllProducts();
 
   try {
-    const res = await fetch(buildUrl(query, size), { signal: AbortSignal.timeout(8000) });
-    if (res.ok) {
-      const data = await res.json();
-      const products = parseTubitak(data);
-      if (products.length > 0) {
-        recordPrices(products);
-        updateState({ status: 'live', lastUpdate: new Date(), source: `TÜBİTAK • ${radius}km`, productCount: (data.numberOfFound as number) || products.length });
-        return products;
-      }
-    }
-  } catch { /**/ }
-
-  // Simülasyon arama
-  const sim = getSimProducts();
-  const filtered = sim.filter((p) => p.name.toLowerCase().includes(query.toLowerCase()) || p.brand.toLowerCase().includes(query.toLowerCase()));
-  updateState({ status: 'simulation', lastUpdate: new Date(), source: `${radius}km`, productCount: filtered.length });
-  return filtered;
+    const res = await fetch(buildUrl(query, size), { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const products = parseTubitak(data);
+    recordPrices(products);
+    updateState({ status: 'live', lastUpdate: new Date(), source: `TÜBİTAK • ${radius}km`, productCount: (data.numberOfFound as number) || products.length });
+    return products;
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'Bilinmeyen hata';
+    updateState({ status: 'error', source: msg, productCount: 0 });
+    return [];
+  }
 }
 
 export function clearCache() { cachedAll = []; cachedVersion = -1; }
