@@ -23,6 +23,7 @@ import { getMarketLink, getTrendyolLink, getHepsiburadaLink } from '../utils/mar
 import { trackSupabaseEvent } from '../lib/supabase';
 import { formatDistance } from '../api/market-api';
 import { updatePageMeta, pageMeta } from '../utils/seo';
+import { useNearbyStores } from '../hooks/useNearbyStores';
 import { parseHash, setHash } from '../utils/router';
 import { ProductPage, CategoryPage, MarketPage } from './SeoPages';
 
@@ -105,6 +106,8 @@ export default function CampaignApp() {
   const [addressQuery, setAddressQuery] = useState('');
   const [addressResults, setAddressResults] = useState<AddressResult[]>([]);
   const [radius, setRadiusState] = usePersistedState<number>('search_radius', 3);
+  const hasRealLocation = location.status === 'granted' || location.status === 'manual';
+  const { stores: nearbyStores, loading: storesLoading } = useNearbyStores(location.lat, location.lon, radius, hasRealLocation);
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(null), 2500); };
 
@@ -437,11 +440,18 @@ export default function CampaignApp() {
                 <span className={`inline-block h-1.5 w-1.5 rounded-full flex-shrink-0 ${apiStatus === 'live' ? 'bg-emerald-400 pulse-dot' : 'bg-white/40'}`} />
                 {apiStatus === 'live' ? 'Canlı' : `${radius}km`}
               </span>
-              <button onClick={() => setShowCityPicker(!showCityPicker)} className="inline-flex items-center gap-1 hover:text-white">
+              <button onClick={() => {
+                if (location.status === 'denied') requestGPS();
+                setShowCityPicker(!showCityPicker);
+              }} className="inline-flex items-center gap-1 hover:text-white">
                 <MapPin size={10} className="flex-shrink-0" />
-                {location.status === 'loading' ? <span className="inline-flex items-center gap-1"><RefreshCw size={9} className="flex-shrink-0 animate-spin" />Konum...</span> :
-                 location.status === 'denied' ? <span>Konum seç</span> :
-                 <span className="truncate max-w-[120px]">{displayName}</span>}
+                {location.status === 'loading' ? (
+                  <span className="inline-flex items-center gap-1"><RefreshCw size={9} className="flex-shrink-0 animate-spin" />Konum alınıyor</span>
+                ) : location.status === 'denied' ? (
+                  <span>Konum izni ver</span>
+                ) : (
+                  <span className="truncate max-w-[120px]">{displayName}</span>
+                )}
               </button>
               <button onClick={loadPopular} className="inline-flex items-center gap-1 flex-shrink-0">
                 <RefreshCw size={10} className={`flex-shrink-0 ${loading ? 'animate-spin' : ''}`} />
@@ -456,7 +466,7 @@ export default function CampaignApp() {
         {showCityPicker && (
           <div className="mt-3 rounded-xl bg-white/10 backdrop-blur-sm p-3 space-y-3">
             {/* GPS butonu */}
-            <button onClick={() => { requestGPS(); setShowCityPicker(false); }} className="flex w-full items-center gap-2 rounded-lg bg-emerald-500/20 border border-emerald-500/30 px-3 py-2.5 text-xs font-medium hover:bg-emerald-500/30 transition-all">
+            <button onClick={() => { requestGPS(); showToast('📍 Konum isteniyor...'); }} className="flex w-full items-center gap-2 rounded-lg bg-emerald-500/20 border border-emerald-500/30 px-3 py-2.5 text-xs font-medium hover:bg-emerald-500/30 transition-all">
               <MapPin size={14} /> Konumumu Otomatik Algıla (GPS)
             </button>
 
@@ -627,6 +637,38 @@ export default function CampaignApp() {
         <div className="rounded-xl border border-dashed border-slate-700 p-8 text-center">
           <p className="text-slate-500 text-sm">Ürün bulunamadı</p>
           <button onClick={() => { setHomeMarketFilter('all'); setHomeCategoryFilter('all'); }} className="mt-2 text-xs text-emerald-400 hover:underline">Filtreleri temizle</button>
+        </div>
+      )}
+
+      {/* Yakındaki Gerçek Market Şubeleri — sadece gerçek konum varsa */}
+      {hasRealLocation && apiStatus === 'live' && storesLoading && (
+        <div className="flex gap-2 overflow-x-auto scrollbar-hide">
+          {[1,2,3].map((i) => <div key={i} className="flex-shrink-0 w-36 h-20 skeleton" />)}
+        </div>
+      )}
+      {hasRealLocation && apiStatus === 'live' && nearbyStores.length > 0 && (
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-bold text-slate-400">📍 Yakındaki Marketler</span>
+            <span className="text-[10px] text-slate-600">{nearbyStores.length} şube · {radius}km</span>
+          </div>
+          <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-1">
+            {nearbyStores.slice(0, 10).map((store) => (
+              <a key={store.id} href={`https://www.google.com/maps/dir/?api=1&destination=${store.lat},${store.lon}`}
+                target="_blank" rel="noopener noreferrer"
+                className="flex-shrink-0 w-36 rounded-xl border border-slate-700/50 bg-slate-800/50 p-3 hover:border-emerald-500/30 transition-all">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-lg">{store.logo}</span>
+                  <span className="text-xs font-bold text-slate-300 truncate">{store.name}</span>
+                </div>
+                <p className="text-[10px] text-slate-500 truncate">{store.address || 'Adres bilgisi yok'}</p>
+                <div className="flex items-center justify-between mt-1.5">
+                  <span className="text-[10px] font-medium text-emerald-400">📍 {store.distanceM < 1000 ? `${store.distanceM}m` : `${(store.distanceM / 1000).toFixed(1)}km`}</span>
+                  <MapPin size={10} className="text-slate-600" />
+                </div>
+              </a>
+            ))}
+          </div>
         </div>
       )}
 

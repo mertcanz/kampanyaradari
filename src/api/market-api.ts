@@ -135,32 +135,44 @@ function parseTubitak(data: Record<string, unknown>): MarketProduct[] {
 function getSimProducts(): MarketProduct[] {
   const sim = generateLivePrices();
 
-  // Yarıçapa göre hangi marketler erişilebilir
+  // Fallback'te yarıçapa göre yaklaşık market çeşitliliği
   const marketsByRadius: Record<number, string[]> = {
-    1: ['a101', 'bim'],           // 1km: sadece en yakın 2 market
-    3: ['a101', 'bim', 'sok', 'migros'],  // 3km: 4 market
-    5: ['a101', 'bim', 'sok', 'migros', 'carrefour'],  // 5km: 5 market
-    10: ['a101', 'bim', 'sok', 'migros', 'carrefour', 'getir'], // 10km: hepsi
+    1: ['a101', 'bim', 'sok'],
+    3: ['a101', 'bim', 'sok', 'migros'],
+    5: ['a101', 'bim', 'sok', 'migros', 'carrefour', 'tarim_kredi'],
+    10: ['a101', 'bim', 'sok', 'migros', 'carrefour', 'tarim_kredi', 'getir'],
   };
-
   const allowedMarkets = new Set(marketsByRadius[radius] || marketsByRadius[3]);
-
-  // Sadece izin verilen marketlerdeki ürünler
   const filtered = sim.filter((p) => allowedMarkets.has(p.marketId));
 
-  // Simüle mesafe üret
   return filtered.map((p: LiveProduct, idx: number) => {
     const market = resolveMarket(p.marketId);
-    const fakeDist = +(0.2 + (idx * 0.15) % (radius * 0.9)).toFixed(1);
+    const fakeDist = +(0.15 + (idx * 0.12) % Math.max(radius * 0.85, 0.7)).toFixed(2);
     return {
-      id: p.id, name: p.name, brand: p.brand, category: p.category, menuCategory: '', emoji: p.emoji,
-      unit: p.unit, imageUrl: null, marketId: market.id, marketName: market.name,
-      marketLogo: market.logo, marketColor: market.color,
-      depotName: `${market.name} Şube`, depotLat: null, depotLon: null,
+      id: p.id,
+      name: p.name,
+      brand: p.brand,
+      category: p.category,
+      menuCategory: '',
+      emoji: p.emoji,
+      unit: p.unit,
+      imageUrl: null,
+      marketId: market.id,
+      marketName: market.name,
+      marketLogo: market.logo,
+      marketColor: market.color,
+      depotName: `${market.name} Şube`,
+      depotLat: null,
+      depotLon: null,
       distanceKm: fakeDist,
-      price: p.currentPrice, unitPrice: '', unitPriceValue: null, discount: p.currentPrice < p.basePrice * 0.85,
+      price: p.currentPrice,
+      unitPrice: '',
+      unitPriceValue: null,
+      discount: p.currentPrice < p.basePrice * 0.85,
       discountRatio: Math.round((1 - p.currentPrice / p.basePrice) * 100),
-      promotionText: null, indexTime: '', source: 'simulation' as const,
+      promotionText: null,
+      indexTime: '',
+      source: 'simulation' as const,
     };
   });
 }

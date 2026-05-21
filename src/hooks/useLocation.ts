@@ -121,8 +121,12 @@ export function useLocation() {
           save({ lat, lon, district: geo.district, city: geo.city, fullAddress: geo.fullAddress, status: 'granted' });
         }).catch(() => {});
       },
-      () => { save({ ...location, status: 'denied' }); },
-      { enableHighAccuracy: false, timeout: 5000, maximumAge: 600000 }
+      (err) => {
+        console.warn('GPS hatası:', err.code, err.message);
+        // Denied durumunda default konumu koru ama status güncelle
+        save({ ...defaults, status: 'denied' });
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
     );
   };
 
@@ -130,14 +134,36 @@ export function useLocation() {
     save({ lat, lon, district, city, fullAddress: [district, city].filter(Boolean).join(', '), status: 'manual' });
   };
 
-  // İlk açılışta: kayıtlı varsa hemen kullan, yoksa GPS'i gecikmeyle iste
+  // İlk açılışta: kayıtlı konum varsa kullan, yoksa izin durumuna göre GPS iste
   useEffect(() => {
     const saved = loadSaved();
     if (saved.status === 'granted' || saved.status === 'manual') {
       setLocation(saved);
-    } else {
-      setTimeout(() => requestGPS(), 1500); // Sayfanın yüklenmesini bekleme
+      return;
     }
+
+    const initGps = async () => {
+      try {
+        if ('permissions' in navigator && navigator.permissions?.query) {
+          const result = await navigator.permissions.query({ name: 'geolocation' as PermissionName });
+          if (result.state === 'granted') {
+            requestGPS();
+            return;
+          }
+          if (result.state === 'prompt') {
+            setTimeout(() => requestGPS(), 800);
+            return;
+          }
+          save({ ...defaults, status: 'denied' });
+          return;
+        }
+      } catch {
+        // permissions API yoksa direkt dene
+      }
+      setTimeout(() => requestGPS(), 800);
+    };
+
+    initGps();
   }, []);
 
   const displayName = location.district
