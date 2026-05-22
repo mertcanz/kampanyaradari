@@ -110,10 +110,14 @@ function parseTubitak(data: Record<string, unknown>): MarketProduct[] {
     const emoji = getProductEmoji(title, mainCat);
     for (const depot of depots) {
       const market = resolveMarket((depot.marketAdi || '') as string);
-      const depotLat = typeof depot.latitude === 'number' ? depot.latitude : depot.latitude ? Number(depot.latitude) : null;
-      const depotLon = typeof depot.longitude === 'number' ? depot.longitude : depot.longitude ? Number(depot.longitude) : null;
-      const distanceKm = depotLat !== null && depotLon !== null ? calcDistanceKm(lat, lon, depotLat, depotLon) : null;
-      if (distanceKm !== null && distanceKm > radius) continue;
+      // Koordinat alanı için birden fazla isim dene (API versiyonları farklı kullanıyor)
+      const depotLat = (depot.latitude ?? depot.lat ?? depot.coordinateLat ?? null) as number | null;
+      const depotLon = (depot.longitude ?? depot.lon ?? depot.coordinateLon ?? null) as number | null;
+      // Mesafeyi sadece göstermek için hesapla — TÜBİTAK zaten distance parametresiyle
+      // sunucu tarafında filtreledi, burada tekrar elemiyoruz.
+      const distanceKm = depotLat !== null && depotLon !== null
+        ? calcDistanceKm(lat, lon, Number(depotLat), Number(depotLon))
+        : null;
       products.push({
         id: `${item.id}-${depot.depotId}`, name: title, brand, category: mainCat, menuCategory: menuCat,
         emoji, unit, imageUrl, marketId: market.id, marketName: market.name, marketLogo: market.logo, marketColor: market.color,
