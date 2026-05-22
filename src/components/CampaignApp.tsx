@@ -12,7 +12,10 @@ import {
   type NeedItem, type OptimizationResult,
 } from '../engine/optimizer';
 import {
-  searchProducts, loadAllProducts, setAPILocation, setRadius, clearCache, subscribeAPI, type MarketProduct, type ConnectionStatus,
+  searchProducts, loadAllProducts, setAPILocation, setRadius, clearCache, subscribeAPI,
+  loadCategoryProducts,
+  groupProducts, fetchProductImage,
+  type MarketProduct, type ProductGroup, type ConnectionStatus,
 } from '../api/market-api';
 import { useLocation, searchAddress, popularDistricts, type AddressResult } from '../hooks/useLocation';
 import { usePersistedState } from '../hooks/usePersistedState';
@@ -58,6 +61,11 @@ export default function CampaignApp() {
   const [loading, setLoading] = useState(false);
   const [lastRefresh, setLastRefresh] = useState(new Date());
   const [apiStatus, setApiStatus] = useState<ConnectionStatus>('connecting');
+
+  // Kategori lazy load — categoryId → yüklü ürünler
+  const categoryProductsMap = useRef<Map<string, MarketProduct[]>>(new Map());
+  const [categoryLoading, setCategoryLoading] = useState<string | null>(null);
+  const [categoryProducts, setCategoryProducts] = useState<MarketProduct[] | null>(null);
 
   // Cart
   const [needItems, setNeedItems] = usePersistedState<NeedItem[]>('need_items', []);
@@ -157,11 +165,41 @@ export default function CampaignApp() {
     return unsub;
   }, []);
 
-  // Konum/yarıçap değişimi
+  // Konum/yarıçap değişimi — kategori cache'ini de sıfırla
   useEffect(() => {
     setAPILocation(location.lat, location.lon, radius);
+    categoryProductsMap.current.clear();
+    setCategoryProducts(null);
     if (!loadingRef.current) { loadingRef.current = true; loadPopular().finally(() => { loadingRef.current = false; }); }
   }, [location.lat, location.lon, radius]);
+
+  // Kategori lazy load — kullanıcı bir kategoriye tıklayınca tetiklenir
+  useEffect(() => {
+    if (homeCategoryFilter === 'all') { setCategoryProducts(null); return; }
+
+    // Zaten yüklüyse state'e koy, fetch etme
+    const cached = categoryProductsMap.current.get(homeCategoryFilter);
+    if (cached) { setCategoryProducts(cached); return; }
+
+    const cat = categories.find((c) => c.id === homeCategoryFilter);
+    if (!cat?.searchTerms?.length) return;
+
+    setCategoryLoading(homeCategoryFilter);
+    setCategoryProducts(null);
+
+    loadCategoryProducts(homeCategoryFilter, cat.searchTerms, 15)
+      .then((products) => {
+        categoryProductsMap.current.set(homeCategoryFilter, products);
+        // Sadece hâlâ aynı filtre seçiliyse göster
+        setCategoryProducts((prev) => {
+          // React closure'dan kaçınmak için functional update kullanmıyoruz,
+          // çünkü filter değeri zaten useEffect bağımlılığında
+          return products;
+        });
+      })
+      .catch(() => setCategoryProducts([]))
+      .finally(() => setCategoryLoading(null));
+  }, [homeCategoryFilter]);
 
   // SEO — sayfa değişiminde title güncelle
   useEffect(() => {
@@ -219,28 +257,122 @@ export default function CampaignApp() {
 
   const filteredProducts = useMemo(() => {
     if (view !== 'home') return allProducts;
-    let items = allProducts;
-    if (homeMarketFilter !== 'all') items = items.filter((p) => p.marketId === homeMarketFilter);
+
+    // Kategori seçiliyse: lazy load edilen ürünleri kullan (henüz yüklenmediyse boş dön)
+    let items: MarketProduct[];
     if (homeCategoryFilter !== 'all') {
-      const cat = categories.find((c) => c.id === homeCategoryFilter);
-      if (cat) {
-        const kws = cat.searchTerms;
-        items = items.filter((p) => { const n = p.name.toLowerCase(); return kws.some((kw) => n.includes(kw)); });
-      }
+      items = categoryProducts ?? [];
+    } else {
+      items = allProducts;
     }
+
+    if (homeMarketFilter !== 'all') items = items.filter((p) => p.marketId === homeMarketFilter);
     if (homeSort === 'cheap') return [...items].sort((a, b) => a.price - b.price);
     if (homeSort === 'discount') return [...items].sort((a, b) => (b.discountRatio || 0) - (a.discountRatio || 0));
     if (homeSort === 'unit') return [...items].sort((a, b) => (a.unitPriceValue ?? 9999) - (b.unitPriceValue ?? 9999));
     return items;
-  }, [allProducts, homeMarketFilter, homeCategoryFilter, homeSort, view]);
+  }, [allProducts, categoryProducts, homeMarketFilter, homeCategoryFilter, homeSort, view]);
 
   // Filtre değişince "daha fazla" kapat
   useEffect(() => { setShowMore(false); }, [homeMarketFilter, homeCategoryFilter, homeSort]);
+
+  // Gruplu görünüm — aynı ürün tipini (örn. "Süt 1L") tek kart altında toplar
+  const groupedProducts = useMemo(() => groupProducts(filteredProducts), [filteredProducts]);
 
   // ─── Components ───
 
   const SkeletonRow = () => (<div className="flex items-center gap-3 rounded-xl border border-slate-700/30 bg-slate-800/30 p-3"><div className="skeleton h-11 w-11 flex-shrink-0" /><div className="flex-1 space-y-2"><div className="skeleton h-4 w-3/4" /><div className="skeleton h-3 w-1/2" /></div><div className="skeleton h-6 w-16 flex-shrink-0" /></div>);
   const SkeletonGrid = ({ count = 6 }: { count?: number }) => (<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">{Array.from({ length: count }).map((_, i) => <SkeletonRow key={i} />)}</div>);
+
+  // ─── GroupCard ───
+  // Aynı ürün tipini (örn. "Süt 1L") tek kart olarak gösterir.
+  // Karta tıklayınca market listesi açılır; markete tıklayınca DetailModal açılır.
+  const GroupCard = ({ group, delay = 0 }: { group: ProductGroup; delay?: number }) => {
+    const [expanded, setExpanded] = useState(false);
+    const [imgUrl, setImgUrl] = useState<string | null>(group.imageUrl);
+    const imgFetchedRef = useRef(false);
+
+    // Görsel API'den gelmediyse internet araması yap (lazy, bir kez)
+    useEffect(() => {
+      if (!imgUrl && !imgFetchedRef.current) {
+        imgFetchedRef.current = true;
+        fetchProductImage(group.normalizedName, group.brands[0] ?? '').then((url) => {
+          if (url) setImgUrl(url);
+        });
+      }
+    }, [group.id]);
+
+    return (
+      <div className="rounded-xl border border-slate-700/50 bg-slate-800/50 overflow-hidden animate-fade-in" style={{ animationDelay: `${delay}ms` }}>
+        {/* Başlık satırı — tıklayınca marketler açılır */}
+        <div onClick={() => setExpanded((v) => !v)} className="flex items-center gap-3 p-3 cursor-pointer hover:bg-slate-800 transition-all active:scale-[0.99]">
+          {imgUrl
+            ? <img src={imgUrl} alt="" className="h-12 w-12 rounded-xl object-cover flex-shrink-0 bg-slate-700" loading="lazy" />
+            : <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-700 text-xl flex-shrink-0">{group.emoji}</div>}
+          <div className="flex-1 min-w-0">
+            <p className="text-[13px] sm:text-sm font-bold text-slate-100 truncate">{group.normalizedName}</p>
+            <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+              <span className="text-[10px] text-slate-500">{group.unit ? `${group.unit} · ` : ''}{group.totalStores} markette</span>
+              {group.brands.length > 0 && (
+                <span className="text-[10px] text-slate-600 truncate max-w-[130px]">
+                  {group.brands.slice(0, 2).join(', ')}{group.brands.length > 2 ? ` +${group.brands.length - 2}` : ''}
+                </span>
+              )}
+              {group.hasDiscount && (
+                <span className="text-[8px] rounded-full bg-red-500/20 text-red-400 px-1.5 py-0.5 font-bold">🏷 İNDİRİM</span>
+              )}
+            </div>
+          </div>
+          <ChevronRight size={14} className={`text-slate-500 flex-shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+        </div>
+
+        {/* Açılır market listesi */}
+        {expanded && (
+          <div className="border-t border-slate-700/50 divide-y divide-slate-700/30">
+            {group.markets.map((m, i) => {
+              // Detail modalı için tam MarketProduct bul
+              const fullProduct = allProducts.find(
+                (p) => p.marketId === m.marketId && p.brand === m.brand && Math.abs(p.price - m.price) < 0.01
+              );
+              return (
+                <div
+                  key={`${m.marketId}-${m.brand}-${i}`}
+                  onClick={() => { if (fullProduct) { setDetailProduct(fullProduct); track('productClicks'); } }}
+                  className={`flex items-center gap-3 px-3 py-2.5 transition-all active:scale-[0.99] ${fullProduct ? 'cursor-pointer hover:bg-slate-700/40' : 'cursor-default'} ${i === 0 ? 'bg-emerald-500/5' : ''}`}
+                >
+                  <span className="text-base flex-shrink-0">{m.marketLogo}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-xs font-medium text-slate-300">{m.marketName}</span>
+                      {m.brand && <span className="text-[10px] text-slate-500">{m.brand}</span>}
+                      {i === 0 && group.markets.length > 1 && (
+                        <span className="text-[8px] rounded-full bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 font-bold">EN UCUZ</span>
+                      )}
+                      {m.discount && m.discountRatio && (
+                        <span className="text-[8px] rounded-full bg-red-500/20 text-red-400 px-1.5 py-0.5">%{m.discountRatio} İND</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      {m.distanceKm !== null && <span className="text-[10px] text-slate-600">📍 {formatDistance(m.distanceKm)}</span>}
+                      {m.unitPrice && <span className="text-[10px] text-slate-600">{m.unitPrice}</span>}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    {m.imageUrl && (
+                      <img src={m.imageUrl} alt="" className="h-9 w-9 rounded-lg object-cover bg-slate-700 hidden sm:block" loading="lazy" />
+                    )}
+                    <span className={`text-sm font-bold ${i === 0 ? 'text-emerald-400' : 'text-slate-300'}`}>
+                      ₺{m.price.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const ProductRow = ({ p, delay = 0 }: { p: MarketProduct; delay?: number }) => (
     <div onClick={() => { setDetailProduct(p); track('productClicks'); }} className="group flex items-center gap-3 rounded-xl border border-slate-700/50 bg-slate-800/50 p-3 transition-all hover:bg-slate-800 hover:border-slate-600 animate-fade-in cursor-pointer active:scale-[0.98] min-h-[56px]" style={{ animationDelay: `${delay}ms` }}>
@@ -296,26 +428,41 @@ export default function CampaignApp() {
           </div>
 
           {/* Fiyat kartı */}
-          <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/20 p-4 mb-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-[10px] text-slate-500 mb-0.5">En ucuz fiyat</p>
-                <p className="text-2xl font-extrabold text-emerald-400">₺{(cheapest || p).price.toFixed(2)}</p>
-              </div>
-              {spread > 0 && (
-                <div className="text-right">
-                  <p className="text-[10px] text-slate-500 mb-0.5">Fiyat farkı</p>
-                  <p className="text-lg font-bold text-amber-400">₺{spread}</p>
+          {(() => {
+            const c = cheapest || p;
+            const origPrice = c.discount && c.discountRatio ? c.price / (1 - c.discountRatio / 100) : null;
+            return (
+              <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/20 p-4 mb-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <p className="text-[10px] text-slate-500">En ucuz fiyat</p>
+                      {c.discount && c.discountRatio && (
+                        <span className="text-[9px] font-bold rounded-full bg-red-500/25 text-red-400 px-2 py-0.5">%{c.discountRatio} İNDİRİM</span>
+                      )}
+                    </div>
+                    <div className="flex items-end gap-2">
+                      <p className="text-2xl font-extrabold text-emerald-400">₺{c.price.toFixed(2)}</p>
+                      {origPrice && <p className="text-sm text-slate-600 line-through mb-0.5">₺{origPrice.toFixed(2)}</p>}
+                    </div>
+                  </div>
+                  {spread > 0 && (
+                    <div className="text-right">
+                      <p className="text-[10px] text-slate-500 mb-0.5">Marketler arası fark</p>
+                      <p className="text-lg font-bold text-amber-400">₺{spread.toFixed(2)}</p>
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-            <div className="flex items-center gap-2 mt-2 text-xs text-slate-400">
-              <span>{cheapest.marketLogo} {cheapest.marketName}</span>
-              {cheapest.depotName && <span>· {cheapest.depotName}</span>}
-              {cheapest.distanceKm !== null && <span>· 📍 {formatDistance(cheapest.distanceKm)}</span>}
-            </div>
-            {(cheapest || p).unitPrice && <p className="text-[10px] text-slate-500 mt-1">{(cheapest || p).unitPrice}</p>}
-          </div>
+                <div className="flex items-center gap-2 mt-2 text-xs text-slate-400 flex-wrap">
+                  <span>{cheapest.marketLogo} {cheapest.marketName}</span>
+                  {cheapest.depotName && <span>· {cheapest.depotName}</span>}
+                  {cheapest.distanceKm !== null && <span>· 📍 {formatDistance(cheapest.distanceKm)}</span>}
+                </div>
+                {c.promotionText && <p className="text-[10px] text-amber-400 mt-1.5 font-medium">🏷 {c.promotionText}</p>}
+                {c.unitPrice && <p className="text-[10px] text-slate-500 mt-1">{c.unitPrice}</p>}
+              </div>
+            );
+          })()}
 
           {/* Tüm marketlerdeki fiyatlar */}
           {allVersions.length > 0 && (
@@ -324,33 +471,56 @@ export default function CampaignApp() {
                 {allVersions.length > 1 ? `${allVersions.length} markette karşılaştırma` : 'Market bilgisi'}
               </h4>
               <div className="space-y-1.5">
-                {allVersions.map((s, i) => (
-                  <div key={s.id} className={`flex items-center gap-2 rounded-lg p-2 ${i === 0 ? 'bg-emerald-500/5 border border-emerald-500/20' : ''}`}>
-                    <span className="text-sm">{s.marketLogo}</span>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-xs font-medium text-slate-300">{s.marketName}</span>
-                        {i === 0 && allVersions.length > 1 && <span className="text-[8px] rounded-full bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 font-bold">EN UCUZ</span>}
-                      </div>
-                      <div className="flex items-center gap-2 text-[10px] text-slate-600">
-                        {s.depotName && <span>{s.depotName}</span>}
-                        {s.distanceKm !== null && <span>📍 {formatDistance(s.distanceKm)}</span>}
+                {allVersions.map((s, i) => {
+                  const origPrice = s.discount && s.discountRatio ? s.price / (1 - s.discountRatio / 100) : null;
+                  const isCheapest = i === 0 && allVersions.length > 1;
+                  return (
+                    <div key={s.id} className={`rounded-lg p-2.5 border ${isCheapest ? 'bg-emerald-500/5 border-emerald-500/20' : s.discount ? 'bg-red-500/5 border-red-500/10' : 'border-transparent'}`}>
+                      <div className="flex items-start gap-2">
+                        <span className="text-sm mt-0.5">{s.marketLogo}</span>
+                        <div className="flex-1 min-w-0">
+                          {/* Market adı + rozetler */}
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="text-xs font-semibold text-slate-200">{s.marketName}</span>
+                            {s.brand && <span className="text-[10px] text-slate-500">{s.brand}</span>}
+                            {isCheapest && <span className="text-[8px] font-bold rounded-full bg-emerald-500/25 text-emerald-400 px-1.5 py-0.5">EN UCUZ</span>}
+                            {s.discount && s.discountRatio && (
+                              <span className="text-[8px] font-bold rounded-full bg-red-500/25 text-red-400 px-1.5 py-0.5">%{s.discountRatio} İND</span>
+                            )}
+                          </div>
+                          {/* Şube + mesafe */}
+                          <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                            {s.depotName && <span className="text-[10px] text-slate-600">{s.depotName}</span>}
+                            {s.distanceKm !== null && <span className="text-[10px] text-slate-600">📍 {formatDistance(s.distanceKm)}</span>}
+                            {s.unitPrice && <span className="text-[10px] text-slate-500">{s.unitPrice}</span>}
+                          </div>
+                          {/* Promosyon metni */}
+                          {s.promotionText && (
+                            <p className="text-[10px] text-amber-400 font-medium mt-1">🏷 {s.promotionText}</p>
+                          )}
+                        </div>
+                        {/* Fiyat */}
+                        <div className="text-right flex-shrink-0 ml-1">
+                          {origPrice && (
+                            <p className="text-[10px] text-slate-600 line-through">₺{origPrice.toFixed(2)}</p>
+                          )}
+                          <span className={`text-sm font-extrabold ${s.discount ? 'text-red-400' : isCheapest ? 'text-emerald-400' : 'text-slate-300'}`}>
+                            ₺{s.price.toFixed(2)}
+                          </span>
+                        </div>
+                        {/* Yol tarifi */}
+                        <a href={s.depotLat && s.depotLon
+                          ? `https://www.google.com/maps/dir/?api=1&destination=${s.depotLat},${s.depotLon}`
+                          : `https://www.google.com/maps/search/${encodeURIComponent(s.marketName + ' ' + (s.depotName || displayName))}`}
+                          target="_blank" rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="flex-shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-lg bg-slate-700/50 text-slate-500 hover:text-emerald-400 transition-all" title="Yol tarifi">
+                          <MapPin size={12} />
+                        </a>
                       </div>
                     </div>
-                    <div className="text-right flex-shrink-0">
-                      <span className={`text-sm font-bold ${i === 0 ? 'text-emerald-400' : 'text-slate-300'}`}>₺{s.price.toFixed(2)}</span>
-                    </div>
-                    {/* Yol tarifi */}
-                    <a href={s.depotLat && s.depotLon
-                      ? `https://www.google.com/maps/dir/?api=1&destination=${s.depotLat},${s.depotLon}`
-                      : `https://www.google.com/maps/search/${encodeURIComponent(s.marketName + ' ' + (s.depotName || displayName))}`}
-                      target="_blank" rel="noopener noreferrer"
-                      onClick={(e) => e.stopPropagation()}
-                      className="flex-shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-lg bg-slate-700/50 text-slate-500 hover:text-emerald-400 transition-all" title="Yol tarifi">
-                      <MapPin size={12} />
-                    </a>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -592,11 +762,20 @@ export default function CampaignApp() {
         </div>
         <div className="flex gap-1.5 overflow-x-auto scrollbar-hide">
           <button onClick={() => setHomeCategoryFilter('all')} className={`rounded-full px-3 py-2 sm:px-2.5 sm:py-1.5 text-xs sm:text-[11px] font-medium flex-shrink-0 transition-all border active:scale-95 ${homeCategoryFilter === 'all' ? 'bg-violet-500/15 text-violet-400 border-violet-500/40' : 'bg-slate-800/50 text-slate-400 border-slate-700/50'}`}>🧺 Tümü</button>
-          {productCategories.filter((c) => c.count > 0).map((cat) => (
-            <button key={cat.id} onClick={() => setView('category', cat.id)} className="rounded-full px-3 py-2 sm:px-2.5 sm:py-1.5 text-xs sm:text-[11px] font-medium flex-shrink-0 transition-all border active:scale-95 bg-slate-800/50 text-slate-400 border-slate-700/50 hover:text-violet-400 hover:border-violet-500/40">
-              {cat.emoji} {cat.name}
-            </button>
-          ))}
+          {categories.map((cat) => {
+            const isActive = homeCategoryFilter === cat.id;
+            const isLoading = categoryLoading === cat.id;
+            return (
+              <button key={cat.id}
+                onClick={() => setHomeCategoryFilter(isActive ? 'all' : cat.id)}
+                className={`inline-flex items-center gap-1 rounded-full px-3 py-2 sm:px-2.5 sm:py-1.5 text-xs sm:text-[11px] font-medium flex-shrink-0 transition-all border active:scale-95 ${isActive ? 'bg-violet-500/15 text-violet-400 border-violet-500/40' : 'bg-slate-800/50 text-slate-400 border-slate-700/50 hover:text-violet-400 hover:border-violet-500/40'}`}>
+                {isLoading
+                  ? <RefreshCw size={10} className="animate-spin flex-shrink-0" />
+                  : <span>{cat.emoji}</span>}
+                {cat.name}
+              </button>
+            );
+          })}
         </div>
         <div className="flex items-center gap-1">
           {([['popular','Önerilen'],['cheap','En ucuz'],['discount','İndirimli'],['unit','₺/Kg']] as const).map(([k, l]) => (
@@ -609,36 +788,66 @@ export default function CampaignApp() {
       </div>
 
       {/* Ürün sayısı */}
-      {(filteredProducts.length > 0 || loading) && (
+      {(groupedProducts.length > 0 || loading || categoryLoading) && (
         <div className="flex items-center justify-between">
           <p className="text-[11px] text-slate-600">
-            {filteredProducts.length} ürün
-            {(homeMarketFilter !== 'all' || homeCategoryFilter !== 'all') && ' · filtreli'}
+            {categoryLoading
+              ? 'Kategori yükleniyor...'
+              : `${groupedProducts.length} ürün grubu${homeMarketFilter !== 'all' || homeCategoryFilter !== 'all' ? ' · filtreli' : ''}`}
           </p>
-          {loading && <RefreshCw size={11} className="text-slate-700 animate-spin flex-shrink-0" />}
+          {(loading || categoryLoading) && <RefreshCw size={11} className="text-slate-700 animate-spin flex-shrink-0" />}
         </div>
       )}
 
       {/* Ürünler */}
-      {loading && allProducts.length === 0 ? <SkeletonGrid count={4} /> :
-       filteredProducts.length > 0 ? (
+      {(loading && allProducts.length === 0) || categoryLoading ? <SkeletonGrid count={4} /> :
+       groupedProducts.length > 0 ? (
         <div className="space-y-2">
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">{filteredProducts.slice(0, showMore ? 50 : 10).map((p, i) => <ProductRow key={p.id} p={p} delay={i < 10 ? i * 15 : 0} />)}</div>
-          {!showMore && filteredProducts.length > 10 && (
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">{groupedProducts.slice(0, showMore ? 50 : 10).map((g, i) => <GroupCard key={g.id} group={g} delay={i < 10 ? i * 15 : 0} />)}</div>
+          {!showMore && groupedProducts.length > 10 && (
             <>
               {adminSettings.showAds && adminSettings.adsNative && <AdSlot type="native" />}
               <button onClick={() => setShowMore(true)} className="w-full rounded-xl border border-slate-700 bg-slate-800/50 py-3 text-xs font-medium text-slate-400 hover:text-emerald-400 hover:border-emerald-500/30 active:scale-[0.98] transition-all">
-                +{filteredProducts.length - 10} ürün daha göster
+                +{groupedProducts.length - 10} ürün grubu daha göster
               </button>
             </>
           )}
         </div>
-      ) : (
-        <div className="rounded-xl border border-dashed border-slate-700 p-8 text-center">
-          <p className="text-slate-500 text-sm">Ürün bulunamadı</p>
-          <button onClick={() => { setHomeMarketFilter('all'); setHomeCategoryFilter('all'); }} className="mt-2 text-xs text-emerald-400 hover:underline">Filtreleri temizle</button>
+      ) : apiStatus === 'error' ? (
+        <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-6 text-center space-y-3">
+          <div className="flex justify-center">
+            <div className="rounded-full bg-red-500/10 p-3">
+              <AlertTriangle size={22} className="text-red-400" />
+            </div>
+          </div>
+          <div>
+            <p className="text-sm font-semibold text-slate-200">Ürünler yüklenemedi</p>
+            <p className="text-[11px] text-slate-500 mt-1">TÜBİTAK API&#39;sine bağlanılamıyor.<br />İnternet bağlantınızı kontrol edin.</p>
+          </div>
+          <button onClick={() => { clearCache(); loadPopular(); }}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-500 active:scale-95 transition-all">
+            <RefreshCw size={12} /> Tekrar Dene
+          </button>
         </div>
-      )}
+      ) : (homeMarketFilter !== 'all' || homeCategoryFilter !== 'all') ? (
+        <div className="rounded-xl border border-dashed border-slate-700 p-8 text-center">
+          <p className="text-2xl mb-2">🔍</p>
+          <p className="text-slate-400 text-sm font-medium">Bu filtreyle ürün bulunamadı</p>
+          <button onClick={() => { setHomeMarketFilter('all'); setHomeCategoryFilter('all'); }}
+            className="mt-3 text-xs text-emerald-400 hover:underline">
+            Filtreleri temizle
+          </button>
+        </div>
+      ) : allProducts.length === 0 && !loading ? (
+        <div className="rounded-xl border border-dashed border-slate-700 p-8 text-center space-y-3">
+          <p className="text-2xl">🛒</p>
+          <p className="text-slate-500 text-sm">Konumunuza göre ürünler yükleniyor...</p>
+          <button onClick={loadPopular}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 px-4 py-2 text-xs text-slate-400 hover:text-emerald-400 active:scale-95 transition-all">
+            <RefreshCw size={12} /> Yükle
+          </button>
+        </div>
+      ) : null}
 
       {/* Yakındaki Gerçek Market Şubeleri — sadece gerçek konum varsa */}
       {hasRealLocation && apiStatus === 'live' && storesLoading && (

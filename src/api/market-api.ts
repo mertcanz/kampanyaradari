@@ -235,4 +235,227 @@ export async function searchProducts(query: string, size = 30): Promise<MarketPr
   }
 }
 
-export function clearCache() { cachedAll = []; cachedVersion = -1; }
+export function clearCache() { cachedAll = []; cachedVersion = -1; categoryCache.clear(); }
+
+// ─── Category Lazy Load ───
+//
+// Her kategorinin keyword listesi (markets.ts'teki searchTerms) buraya gelir.
+// Cache: kategori ID + locationVersion → aynı konum/yarıçap için tek istek.
+// Paralel keyword fetch → her keyword için ayrı API isteği → birleştirilir.
+
+interface CategoryCacheEntry {
+  products: MarketProduct[];
+  version: number;
+}
+const categoryCache = new Map<string, CategoryCacheEntry>();
+
+export async function loadCategoryProducts(
+  categoryId: string,
+  keywords: string[],
+  size = 15
+): Promise<MarketProduct[]> {
+  // Cache hit — aynı konum+yarıçap için tekrar fetch etme
+  const cached = categoryCache.get(categoryId);
+  if (cached && cached.version === locationVersion) return cached.products;
+
+  // Tüm keyword'leri paralel çek
+  const results = await Promise.allSettled(
+    keywords.map(async (q) => {
+      const res = await fetch(buildUrl(q, size), { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return parseTubitak(await res.json());
+    })
+  );
+
+  // Aynı ürün+market kombinasyonundan sadece en yakınını tut
+  const best = new Map<string, MarketProduct>();
+  for (const r of results) {
+    if (r.status !== 'fulfilled') continue;
+    for (const p of r.value) {
+      const key = `${p.name}-${p.marketId}`;
+      const ex = best.get(key);
+      if (!ex || (p.distanceKm ?? 9999) < (ex.distanceKm ?? 9999) ||
+          ((p.distanceKm ?? 9999) === (ex.distanceKm ?? 9999) && p.price < ex.price)) {
+        best.set(key, p);
+      }
+    }
+  }
+
+  const products = Array.from(best.values())
+    .sort((a, b) => (a.distanceKm ?? 99) - (b.distanceKm ?? 99));
+
+  categoryCache.set(categoryId, { products, version: locationVersion });
+  if (products.length > 0) recordPrices(products);
+  return products;
+}
+
+export function clearCategoryCache() { categoryCache.clear(); }
+
+// ─── Product Grouping ───
+//
+// Mantık: Aynı ürün tipini (örn. "Süt 1L") farklı markalar ve marketler
+// arasında tek bir grup olarak birleştirir.
+// "İçim Süt 1L" + "Dost Süt 1L" → group: "Süt 1L" → items: [İçim@BİM, Dost@A101, ...]
+
+export interface MarketEntry {
+  marketId: string;
+  marketName: string;
+  marketLogo: string;
+  marketColor: string;
+  brand: string;
+  price: number;
+  unitPrice: string;
+  unitPriceValue: number | null;
+  discount: boolean;
+  discountRatio: number | null;
+  promotionText: string | null;
+  distanceKm: number | null;
+  depotName: string;
+  imageUrl: string | null;  // bu market+markanın kendi görseli
+}
+
+export interface ProductGroup {
+  id: string;               // normalize edilmiş key
+  normalizedName: string;   // "Süt 1L", "Domates 1kg" vb.
+  category: string;
+  menuCategory: string;
+  emoji: string;
+  unit: string;
+  imageUrl: string | null;  // API'den gelen ilk geçerli görsel
+  imageFetched: boolean;    // internet araması yapıldı mı
+  bestPrice: number;
+  bestMarketId: string;
+  bestMarketName: string;
+  bestMarketColor: string;
+  brands: string[];         // gruptaki tüm markalar
+  markets: MarketEntry[];   // market × marka kombinasyonları, fiyata göre sıralı
+  hasDiscount: boolean;
+  totalStores: number;
+}
+
+/** Başından marka adını çıkarır: "İçim Süt 1L" → "Süt 1L" */
+function stripBrand(title: string, brand: string): string {
+  const t = title.trim();
+  const b = (brand || '').trim();
+  if (b && t.toLowerCase().startsWith(b.toLowerCase())) {
+    return t.slice(b.length).trim();
+  }
+  return t;
+}
+
+/** Gruplama anahtarı için normalize: birim varyasyonlarını eşleştirir */
+function toGroupKey(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/\b(\d+[\.,]?\d*)\s*(litre|lt)\b/g, '$11l')
+    .replace(/\b(\d+[\.,]?\d*)\s*(kilogram)\b/g, '$1kg')
+    .replace(/\b(\d+[\.,]?\d*)\s*(gram|gr)\b/gi, '$1g')
+    .replace(/\b(\d+[\.,]?\d*)\s*(mililitre)\b/g, '$1ml')
+    .replace(/\b(\d+[\.,]?\d*)\s*(adet)\b/g, '$1ad')
+    .replace(/['']/g, '')
+    .trim();
+}
+
+export function groupProducts(products: MarketProduct[]): ProductGroup[] {
+  const map = new Map<string, ProductGroup>();
+
+  for (const p of products) {
+    const normalized = stripBrand(p.name, p.brand);
+    const key = toGroupKey(normalized);
+
+    if (!map.has(key)) {
+      map.set(key, {
+        id: key,
+        normalizedName: normalized,
+        category: p.category,
+        menuCategory: p.menuCategory,
+        emoji: p.emoji,
+        unit: p.unit,
+        imageUrl: p.imageUrl,
+        imageFetched: false,
+        bestPrice: p.price,
+        bestMarketId: p.marketId,
+        bestMarketName: p.marketName,
+        bestMarketColor: p.marketColor,
+        brands: [],
+        markets: [],
+        hasDiscount: false,
+        totalStores: 0,
+      });
+    }
+
+    const g = map.get(key)!;
+
+    // Görsel: API'den gelen ilk geçerli URL
+    if (!g.imageUrl && p.imageUrl) g.imageUrl = p.imageUrl;
+
+    // En ucuz fiyat
+    if (p.price < g.bestPrice) {
+      g.bestPrice = p.price;
+      g.bestMarketId = p.marketId;
+      g.bestMarketName = p.marketName;
+      g.bestMarketColor = p.marketColor;
+    }
+
+    // Markalar (tekrarsız)
+    if (p.brand && !g.brands.includes(p.brand)) g.brands.push(p.brand);
+
+    // Market girişi — her market+marka kombinasyonu bir satır
+    g.markets.push({
+      marketId: p.marketId,
+      marketName: p.marketName,
+      marketLogo: p.marketLogo,
+      marketColor: p.marketColor,
+      brand: p.brand,
+      price: p.price,
+      unitPrice: p.unitPrice,
+      unitPriceValue: p.unitPriceValue,
+      discount: p.discount,
+      discountRatio: p.discountRatio,
+      promotionText: p.promotionText,
+      distanceKm: p.distanceKm,
+      depotName: p.depotName,
+      imageUrl: p.imageUrl,
+    });
+
+    if (p.discount) g.hasDiscount = true;
+    g.totalStores++;
+  }
+
+  // Her grubun market listesini fiyata göre sırala
+  for (const g of map.values()) {
+    g.markets.sort((a, b) => a.price - b.price);
+  }
+
+  // Grupları alfabetik sırala (Türkçe)
+  return Array.from(map.values()).sort((a, b) =>
+    a.normalizedName.localeCompare(b.normalizedName, 'tr')
+  );
+}
+
+// ─── Lazy Image Fetcher ───
+//
+// Kullanım (UI'da):
+//   const url = await fetchProductImage('Süt 1L', 'İçim');
+//   if (url) setImageUrl(url);
+
+const imageCache = new Map<string, string | null>();
+
+export async function fetchProductImage(name: string, brand: string): Promise<string | null> {
+  const cacheKey = `${brand}:${name}`.toLowerCase();
+  if (imageCache.has(cacheKey)) return imageCache.get(cacheKey) ?? null;
+
+  try {
+    const url = `${BACKEND_URL}/api/product-image?name=${encodeURIComponent(name)}&brand=${encodeURIComponent(brand)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    if (!res.ok) { imageCache.set(cacheKey, null); return null; }
+    const data = await res.json() as { imageUrl?: string | null };
+    const img = data.imageUrl ?? null;
+    imageCache.set(cacheKey, img);
+    return img;
+  } catch {
+    imageCache.set(cacheKey, null);
+    return null;
+  }
+}
